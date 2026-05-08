@@ -3,7 +3,7 @@ import { Box, Text } from "ink";
 import React from "react";
 import { t } from "../../i18n/index.js";
 import type { SlashCommandSpec } from "./slash.js";
-import { COLOR, GLYPH } from "./theme.js";
+import { GLYPH, useColor } from "./theme.js";
 
 export interface SlashSuggestionsProps {
   /**
@@ -37,22 +37,21 @@ export function SlashSuggestions({
   matches,
   selectedIndex,
 }: SlashSuggestionsProps): React.ReactElement | null {
+  const color = useColor();
+
   if (matches === null) return null;
   if (matches.length === 0) {
     return (
       <Box paddingX={1} marginTop={1}>
-        <Text color={COLOR.warn} bold>
+        <Text color={color.warn} bold>
           {GLYPH.warn}
         </Text>
         <Text> </Text>
-        <Text color={COLOR.warn}>no slash command matches that prefix</Text>
+        <Text color={color.warn}>no slash command matches that prefix</Text>
         <Text dimColor>{" — Backspace to edit, or /help for the full list"}</Text>
       </Box>
     );
   }
-  // Limit rows so the suggestion list never dwarfs the rest of the
-  // UI. Keep the currently-selected row in view by sliding the
-  // window when the selection is near either edge.
   const MAX = 8;
   const total = matches.length;
   const windowStart =
@@ -63,7 +62,7 @@ export function SlashSuggestions({
   return (
     <Box flexDirection="column" paddingX={1} marginTop={1}>
       <Box>
-        <Text color={COLOR.accent} bold>
+        <Text color={color.accent} bold>
           {"/ "}
         </Text>
         <Text dimColor>{`${total} command${total === 1 ? "" : "s"}`}</Text>
@@ -81,6 +80,7 @@ export function SlashSuggestions({
 }
 
 function SuggestionRow({ spec, isSelected }: { spec: SlashCommandSpec; isSelected: boolean }) {
+  const color = useColor();
   const name = `/${spec.cmd}`;
   const argsSuffix = spec.argsHint ? spec.argsHint : "";
   const key = `slash.${spec.cmd}.description`;
@@ -89,15 +89,15 @@ function SuggestionRow({ spec, isSelected }: { spec: SlashCommandSpec; isSelecte
   const aliasHint = spec.aliases?.length ? ` · /${spec.aliases.join(" /")}` : "";
   return (
     <Box>
-      <Text color={isSelected ? COLOR.primary : COLOR.info} bold={isSelected}>
+      <Text color={isSelected ? color.primary : color.info} bold={isSelected}>
         {isSelected ? `${GLYPH.cur} ` : "  "}
       </Text>
-      <Text color={COLOR.accent} bold={isSelected}>
+      <Text color={color.accent} bold={isSelected}>
         {name.padEnd(14)}
       </Text>
       <Text dimColor>{argsSuffix.padEnd(14)}</Text>
       <Text>{"  "}</Text>
-      <Text color={isSelected ? COLOR.user : COLOR.info} dimColor={!isSelected}>
+      <Text color={isSelected ? color.user : color.info} dimColor={!isSelected}>
         {summary}
       </Text>
       {aliasHint ? <Text dimColor>{aliasHint}</Text> : null}
