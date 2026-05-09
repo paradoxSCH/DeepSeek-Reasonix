@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -139,11 +139,44 @@ describe("expandAtMentions", () => {
     expect(DEFAULT_AT_MENTION_MAX_BYTES).toBe(64 * 1024);
   });
 
-  it("marks a directory mention as not-file", () => {
+  it("expands a directory mention to a recursive listing block", () => {
     const r = expandAtMentions("look at @src", root);
     expect(r.expansions).toHaveLength(1);
-    expect(r.expansions[0]!.ok).toBe(false);
-    expect(r.expansions[0]!.skip).toBe("not-file");
+    const ex = r.expansions[0]!;
+    expect(ex.ok).toBe(true);
+    expect(ex.isDirectory).toBe(true);
+    expect(ex.entries).toBe(1);
+    expect(ex.truncated).toBe(false);
+    expect(r.text).toContain('<directory path="src" entries="1">');
+    expect(r.text).toContain("src/loop.ts");
+    expect(r.text).toContain("</directory>");
+    // The dir block must NOT be wrapped as a `<file>` block.
+    expect(r.text).not.toContain('<file path="src">');
+  });
+
+  it("treats `@<dir>/` and `@<dir>` identically", () => {
+    const r = expandAtMentions("look at @src/", root);
+    expect(r.expansions).toHaveLength(1);
+    expect(r.expansions[0]!.path).toBe("src");
+    expect(r.expansions[0]!.isDirectory).toBe(true);
+  });
+
+  it("caps directory listings at maxDirEntries and flags truncation", () => {
+    mkdirSync(join(root, "many"));
+    for (let i = 0; i < 5; i++) writeFileSync(join(root, "many", `f${i}.txt`), "");
+    const r = expandAtMentions("see @many", root, { maxDirEntries: 2 });
+    expect(r.expansions[0]!.ok).toBe(true);
+    expect(r.expansions[0]!.entries).toBe(2);
+    expect(r.expansions[0]!.truncated).toBe(true);
+    expect(r.text).toContain('truncated="true"');
+  });
+
+  it("respects gitignore rules from the project root when listing a sub-dir", () => {
+    writeFileSync(join(root, ".gitignore"), "src/loop.ts\n");
+    const r = expandAtMentions("see @src", root);
+    expect(r.expansions[0]!.ok).toBe(true);
+    expect(r.expansions[0]!.entries).toBe(0);
+    expect(r.text).not.toContain("src/loop.ts");
   });
 });
 
@@ -278,6 +311,40 @@ describe("rankPickerCandidates", () => {
     expect(r[2]).toBe("b.ts");
   });
 
+  it("fuzzy-subsequence-matches when no substring hits — typed acronyms find the file", () => {
+    // `atmnt` isn't a substring of any path, but is a subsequence of
+    // `at-mentions`. Today's prefix-only ranker would drop it; fuzzy
+    // fallback should surface both at-mentions paths.
+    const r = rankPickerCandidates(files, "atmnt");
+    expect(r).toContain("src/at-mentions.ts");
+    expect(r).toContain("tests/at-mentions.test.ts");
+  });
+
+  it("substring hits still rank above fuzzy-subsequence hits", () => {
+    // `loop` is a substring of "src/loop.ts" (class 2) and
+    // "tests/loop.test.ts" (class 2). It's a subsequence of a few
+    // others (e.g. "src/cli/ui/PromptInput.tsx" has l-o-..-p? actually
+    // no `l` then `o` then `o` then `p` — "PromptInput" is P-r-o-m-p-t,
+    // no subsequence). Use a query that matches both substring and
+    // subsequence to verify substring wins:
+    //   `app` → substring hit on "src/cli/ui/App.tsx" (case-insensitive)
+    //         + subseq match on "src/at-mentions.ts" (a-..-p? no `p`).
+    // Simpler: just ensure all results for `loop` are substring hits
+    // (the only two such files), and nothing fuzzy snuck above.
+    const r = rankPickerCandidates(files, "loop");
+    expect(r[0]).toMatch(/loop/);
+    expect(r[1]).toMatch(/loop/);
+  });
+
+  it("clusters of consecutive subsequence chars rank above scattered ones", () => {
+    const candidates = [
+      "src/a/b/c/d/e/things.ts", // `thgs` scattered as subseq with gaps
+      "src/things.ts", // `thgs` as cleaner subseq, no path noise
+    ];
+    const r = rankPickerCandidates(candidates, "thgs");
+    expect(r[0]).toBe("src/things.ts");
+  });
+
   it("tie-breaks query matches by recently-used, then mtime", () => {
     const entries = [
       { path: "src/alpha.ts", mtimeMs: 100 },
@@ -373,6 +440,19 @@ describe("listFilesSync", () => {
     expect(DEFAULT_PICKER_IGNORE_DIRS).toContain("node_modules");
     expect(DEFAULT_PICKER_IGNORE_DIRS).toContain(".git");
     expect(DEFAULT_PICKER_IGNORE_DIRS).toContain("dist");
+  });
+
+  it("includes symlinks pointing at regular files", () => {
+    writeFileSync(join(root, "target.ts"), "// target\n");
+    let symlinksWorked = true;
+    try {
+      symlinkSync(join(root, "target.ts"), join(root, "alias.ts"));
+    } catch {
+      symlinksWorked = false;
+    }
+    if (!symlinksWorked) return;
+    const files = listFilesSync(root);
+    expect(files).toContain("alias.ts");
   });
 });
 
@@ -474,6 +554,25 @@ describe("listFilesWithStatsAsync", () => {
     const paths = (await listFilesWithStatsAsync(root)).map((e) => e.path);
     expect(paths).not.toContain("drop.log");
     expect(paths).toContain("keep.log");
+  });
+
+  it("includes symlinks pointing at regular files; drops symlinks-to-dirs and broken links", async () => {
+    writeFileSync(join(root, "real-target.ts"), "// target\n");
+    mkdirSync(join(root, "real-dir"));
+    let symlinksWorked = true;
+    try {
+      symlinkSync(join(root, "real-target.ts"), join(root, "linked-file.ts"));
+      symlinkSync(join(root, "real-dir"), join(root, "linked-dir"));
+      symlinkSync(join(root, "no-such-target"), join(root, "broken-link"));
+    } catch {
+      // Windows non-admin can't create symlinks — skip on those hosts.
+      symlinksWorked = false;
+    }
+    if (!symlinksWorked) return;
+    const paths = (await listFilesWithStatsAsync(root)).map((e) => e.path);
+    expect(paths).toContain("linked-file.ts");
+    expect(paths).not.toContain("linked-dir");
+    expect(paths).not.toContain("broken-link");
   });
 });
 

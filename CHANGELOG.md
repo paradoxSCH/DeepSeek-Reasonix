@@ -3,6 +3,290 @@
 All notable changes to Reasonix. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.2] — 2026-05-09
+
+**Headline:** two bug fixes for #468 reported by @dacec354.
+
+**Bug fixes:**
+
+- fix(ui): ↑/↓ on an empty buffer recalls prompt history again. The
+  binding was unbound from arrows back in 9254d3a because Windows
+  Terminal + ConPTY can translate mouse-wheel events to ↑/↓
+  keystrokes (wheel-up was clobbering the prompt with a recalled
+  message); history moved to Ctrl+P / Ctrl+N. That was right for
+  legacy ConPTY but broke the universal CLI convention for
+  everyone else (bash / zsh / fish all bind ↑ to history). Restored
+  ↑/↓ on empty buffer = history; Ctrl+P / Ctrl+N stays as the
+  wheel-immune fallback. Dead `chatScrollHandoff` plumbing dropped.
+  (#475, closes part 1 of #468)
+
+- fix(doctor): tokenizer check now finds the file. The runtime
+  resolver in `tokenizer.ts` had three candidates including a
+  `createRequire("reasonix/package.json")` probe and worked
+  reliably; the doctor had its own copy of the path math that
+  walked `dist/cli/commands/doctor.js → ../../../data/`. After the
+  lazy-import refactor in #467 the doctor compiles to
+  `dist/cli/doctor-HASH.js` (one level shallower), so three `..`
+  walked above the package root and reported "tokenizer not
+  found" even when the npm tarball had it. Reuse the runtime
+  resolver so the two paths can never disagree. (#475, closes part
+  2 of #468)
+
+## [0.33.1] — 2026-05-09
+
+**Headline:** the bottom status row now shows the wallet. Both
+`status.balance` and `status.sessionCost` were already being
+populated by the reducer (refreshed on every submit), and a
+`balanceColor()` helper with red/orange thresholds had been sitting
+unused in the theme — but `StatusRow` only ever rendered the
+per-turn cost and cache-hit pills. Pure plumbing gap; users had
+to type `/cost` to see the running spend or remaining DeepSeek
+balance. Plus a small polish pass on the prompt input footer.
+
+**UI:**
+
+- feat(ui): wallet pill on the status row. New segment renders
+  right of the cache pill: `⛁ ¥1.20 spent  /  ¥45.32 left`. Spent
+  shows when `sessionCost > 0`, balance shows when known; the
+  separator only renders when both are present. Balance is colored
+  via `balanceColor()` (red <¥5, orange <¥20, brand otherwise).
+  Hidden on terminals narrower than 90 cols so the row doesn't
+  wrap. (#473)
+
+- feat(ui): friendlier prompt input. Placeholder reads "ask
+  anything · slash for commands · at-sign for files" instead of
+  "type a message". Hint footer extracted into a `HintRow`
+  component with keycap/label spacing — keys (⏎ ⇧⏎ ↑↓ esc ^C) in
+  `FG.meta`, labels in `FG.faint`. Replaces `shift/alt+⏎` with
+  `⇧⏎` and `ctrl-c` with `^C`. (#473)
+
+## [0.33.0] — 2026-05-09
+
+**Headline:** the filesystem toolbelt grew a hand. Three new tools —
+`multi_edit` for atomic multi-site SEARCH/REPLACE in one file (or
+across files in one call), `todo_write` for lightweight in-session
+intent tracking, and `glob` for mtime-sorted file walks with
+picomatch syntax — close the gaps where the model was either
+round-tripping eight `edit_file` calls or losing its plan to a
+context fold. `search_content` also gains `-C N` context lines.
+
+The other half is cold-start surgery (#464). Stage 1 adds a zero-cost
+profiler gated behind `REASONIX_PROFILE_STARTUP=1`. Stage 2 lazy-
+imports every per-command module and the dashboard server, paying
+for the chat UI only when `reasonix code` actually runs. `reasonix
+version` and `reasonix --help` drop ~290ms (~440ms → ~140ms);
+`reasonix code` is unchanged on the hot path. Critical bug fix at
+the bottom: a long-session OOM where every tool result was retained
+indefinitely in a useRef array left behind when `/tool` was deleted.
+
+**Features:**
+
+- feat(tools): `multi_edit` — atomic batch SEARCH/REPLACE. N edits
+  apply sequentially against an in-memory buffer with one write at
+  the end; any failure (empty edits, search not found, ambiguous
+  match) leaves the file untouched. Edit N+1 can match text inserted
+  by edit N (composable refactors). Cuts the round-trip cost of
+  multi-site rewrites and removes the half-applied-edit failure mode
+  of looping `edit_file`. (#458)
+
+- feat(tools): `multi_edit` cross-file mode. Same atomicity guarantee
+  extended across files: dry-run all targets, then write. One failure
+  rolls the whole batch back. (#462)
+
+- feat(tools): `todo_write` — in-session task tracker. Replace-set
+  semantics (full list every call), no approval gate, no file writes.
+  Each item is `{ content, status, activeForm }` with `status: pending
+  | in_progress | completed`. Validated: at most one `in_progress` at
+  a time. Empty list signals work-done. Sits between `submit_plan`
+  (heavy: approval + checkpoints) and prose lists (lost on history
+  fold). Stays callable in plan mode (`readOnly: true`). (#460)
+
+- feat(tools): `glob` — mtime-sorted file walks. Picomatch syntax
+  (`**/`, `*.{ts,tsx}`); defaults to `sort: "mtime"` so "what did I
+  touch lately" works without arguments. `sort: "name"` for
+  deterministic listings. Skips deps by default, capped at 200 (1000
+  max) with overflow notice. (#462)
+
+- feat(tools): `search_content` gains `context: N`. Semantics match
+  `grep -C N`; output uses ripgrep convention (`:` after match line,
+  `-` after context). (#462)
+
+**Performance:**
+
+- perf(cli): `REASONIX_PROFILE_STARTUP=1` cold-start profiler. Marks
+  at `cli_module_loaded`, `chat_command_enter`, `config_loaded`,
+  `mcp_launch`, `mcp_connected_M_of_N`, `code_command_enter`,
+  `semantic_bootstrap_start`/`_done_*`, `ink_render_complete`. Single
+  env-var read when off; dumps to stderr at first paint when on.
+  Stage 1 of #464. (#466)
+
+- perf(cli): lazy-import every per-command module. Each
+  `reasonix <subcommand>` only loads its own command's chunk. tsup
+  splits, Node loads on first invocation. `reasonix version` and
+  `reasonix --help` drop ~290ms (~440ms → ~140ms); `reasonix code`
+  hot path unchanged (within noise). Stage 2 of #464. (#467)
+
+- perf(cli): lazy-import dashboard server. ~4200 LOC of HTTP / static
+  asset code (`startDashboardServer`) moved to a dynamic
+  `await import()` inside the App startup IIFE — only loads when the
+  user actually opens the dashboard. Two new App marks
+  (`app_render_start`, `app_inner_start`) clarify the first-paint
+  delta. (#469)
+
+**Bug fixes:**
+
+- fix(ui): drop dead `toolHistoryRef` leak. `/tool` was removed in
+  #453 but its supporting plumbing stayed behind: every tool result
+  was being pushed into a useRef array with no consumer reading it,
+  so long sessions retained the full text of every Read / Grep /
+  Bash call indefinitely. Reported by @trytsomile as a
+  `FATAL ERROR: Ineffective mark-compacts near heap limit` crash
+  after ~2.6h on v0.31.0 (V8's 4GB ceiling). 48 lines deleted across
+  4 files; `state.cards[].output` (which actually drives scrollback
+  rendering) is untouched. (#471, closes #465)
+
+- fix(/cwd): re-bootstrap `semantic_search` on workspace swap.
+  FS / shell / memory tools re-registered against the new root, but
+  `semantic_search` kept pointing at the old one — queries silently
+  hit the previous project's index, or the tool stayed registered
+  when the new directory had no index. Split the async re-bootstrap
+  out of the sync `reregisterTools` callback; App.tsx fires
+  `void reBootstrapSemantic(root).then(postInfo)` so the slash
+  dispatch returns synchronously. Tail of #459. (#470)
+
+- fix(ux): fuzzy `@`-mention ranking. The picker's substring-only
+  ranker rejected typo'd subsequences — `@atmnt` returned nothing for
+  `at-mentions.ts`. Adds a fuzzy-subsequence fallback that triggers
+  only when the substring lookup misses; substring hits still win
+  (classes 0/1/2 cap at 29_999, subseq starts at 30_000). Also adds
+  the `/cwd` slash for in-session workspace swap. Parts 1+2 of #459.
+  (#463)
+
+## [0.32.0] — 2026-05-08
+
+**Headline:** the slash surface lost weight. Eleven redundant
+commands gone (`/clear`, `/keys`, `/models`, `/effort`, `/rename`,
+`/forget`, `/think`, `/tool`, `/apply-plan`, `/semantic`,
+`/resume`), the unified preset+model picker replaces three
+near-identical commands, and the two heaviest features almost
+nobody opted into — `/harvest` (Pillar-2 plan-state extraction)
+and `/branch` (parallel-sample selector) — are deleted along with
+their backing modules, events, transcript fields, and CLI flags.
+The four-pillar architecture collapses to three. The slash registry
+now carries a `group` tag (chat / setup / info / session / extend
+/ code / jobs / advanced) and bare-`/` suggestions render those
+groups with advanced rows hidden behind a `+ N advanced · type to
+search` footer. A new `~/.reasonix/slash-usage.json` counter
+sorts frequent commands first within a prefix.
+
+The other half of the release is plan-mode UX. PlanLiveRow had
+nothing to dock — a code path that should have materialized an
+"active" plan card on approval was missing, so the bottom strip
+stayed empty after `/plan`. Fixed. And the per-step "Checkpoint —
+step done" picker fired in auto/yolo too, defeating the whole
+point of those modes; auto/yolo now resolve "continue" without
+prompting while still creating per-step rollback snapshots so
+`/restore` granularity stays intact. Plus a long-standing
+`@`-mention bug: typing `@docs/` produced an empty `not-file`
+placeholder. It now expands to a recursive `<directory>` listing
+respecting the project's gitignore, and symlinked source files
+finally appear in the `@`-picker.
+
+**Features:**
+
+- feat(semantic): OpenAI-compatible embedding provider. Configure
+  custom API URL / key / model / request body for embeddings,
+  replacing the Ollama-only setup. Dashboard semantic panel adds
+  a provider dropdown with "OpenAI-Compatible" alongside Ollama,
+  clearer status messages, and detailed indexing-job phases
+  (scanning / embedding / writing). Community contribution from
+  @kabaka9527. (#424)
+
+- feat(slash): unified preset+model picker. `ModelPicker` shows the
+  three presets at the top with cost/headline copy and the model
+  catalog below; cursor lands on the active row (auto-detects which
+  preset matches the loop's current model + effort + autoEscalate).
+  Both `/preset` (no arg) and `/model` (no arg) open it. (#453)
+
+- feat(slash): grouped suggestions + usage telemetry.
+  `SlashCommandSpec` gains a `group` field; suggestion palette
+  renders section headers on bare `/` with advanced rows hidden
+  behind a footer. New `~/.reasonix/slash-usage.json` counter
+  (read-modify-write, atomic rename) feeds `suggestSlashCommands`
+  so frequent commands sort first; `slash.invoked` events emit to
+  events.jsonl for cross-session analysis. `/help` walks the same
+  grouped registry so there's one source of truth. (#453)
+
+**Bug fixes:**
+
+- fix(plan): dock active plan card. `case "plan_proposed"` had
+  been dropping the gate payload's `steps`/`summary`, and the
+  approve path never dispatched `plan.show` — so no card with
+  `variant: "active"` ever existed and `isActivePlanInFlight`
+  returned null. PlanLiveRow now docks correctly after approval,
+  and the dock tracks tail rewrites on revise-accept. (#454)
+
+- fix(plan): auto/yolo skip the per-step checkpoint picker. The
+  "Checkpoint — step done" picker fired after every
+  `mark_step_complete` regardless of edit mode — shell and
+  edit-gate already self-skip in auto/yolo, but plan checkpoints
+  kept stopping the model. The gate handler now checks
+  `editModeRef` and resolves "continue" without UI; per-step
+  rollback snapshot still runs so `/restore` granularity is
+  preserved. `review` mode is unchanged. (#454)
+
+- fix(at-mentions): `@<dir>` expands to a recursive listing.
+  Was treated as a `not-file` skip, leaving the model with an
+  empty placeholder. Walks the project root with the existing
+  gitignore layers, filters to entries under the directory, and
+  inlines a `<directory path="..." entries="N">` block capped at
+  `DEFAULT_AT_DIR_MAX_ENTRIES` (200). `@docs/` and `@docs`
+  resolve identically. (#455, closes #451)
+
+- fix(at-mentions): symlinks-to-files appear in the `@`-picker.
+  `Dirent.isFile()` returns false for symlinks, so symlinked
+  source files never showed up in completions. Both
+  `listFilesWithStatsSync` and `listFilesWithStatsAsync` now stat
+  through symlinks; symlinks-to-files come back, symlinks-to-dirs
+  stay dropped (cycle risk), broken links stay dropped (nothing
+  to point at). (#455, closes #451)
+
+**Removals — slash commands:**
+
+- `/clear` (merged into `/new` as alias — was the most common
+  source of "what's the difference?" confusion)
+- `/models` (picker covers it)
+- `/keys` (folded into `/help`)
+- `/resume` (sessions picker has switch action)
+- `/semantic` (folded into `/doctor`)
+- `/effort` (preset locks effort)
+- `/rename` and `/forget` (sessions picker actions)
+- `/apply-plan` (plan picker handles the fallback path)
+- `/think` and `/tool` (debug-only; events.jsonl records both)
+- `/mcp browse` entry (handler still routes `["browse"]`)
+
+**Removals — features:**
+
+- `/harvest` (Pillar-2 plan-state extraction): `src/harvest.ts`,
+  `--harvest` CLI flag, `harvestedTurns` transcript field.
+- `/branch` (parallel-sample selector): `src/consistency.ts`,
+  `src/loop/branch.ts`, `BranchCard`,
+  `branch_start/progress/done` events, `--branch` CLI flag.
+- `benchmarks/harvest/` deleted; `ARCHITECTURE.md` collapses from
+  four pillars to three; README + zh-CN + `dashboard/PARITY.md`
+  updated.
+
+**Removals — public API:**
+
+- `src/index.ts` drops `harvest`, `runBranches`,
+  `aggregateBranchUsage`, `defaultSelector`, `emptyPlanState`,
+  `isPlanStateEmpty`, and the `TypedPlanState`, `HarvestOptions`,
+  `BranchSample`, `BranchSummary`, `BranchProgress`,
+  `BranchOptions`, `BranchResult`, `BranchSelector` types.
+  Consumers depending on these break intentionally — they were
+  experimental from the start and never met the cache-first
+  cost target this project gates on.
+
 ## [0.31.0] — 2026-05-08
 
 **Headline:** a Mac user reported a DeepSeek 503 day where Reasonix

@@ -28,6 +28,7 @@ import { ToolRegistry } from "../../tools.js";
 import { registerChoiceTool } from "../../tools/choice.js";
 import { registerMemoryTools } from "../../tools/memory.js";
 import { registerWebTools } from "../../tools/web.js";
+import { markPhase } from "../startup-profile.js";
 import { App } from "../ui/App.js";
 import { SessionPicker } from "../ui/SessionPicker.js";
 import { Setup } from "../ui/Setup.js";
@@ -263,8 +264,6 @@ export interface ChatOptions {
   model: string;
   system: string;
   transcript?: string;
-  harvest?: boolean;
-  branch?: number;
   /**
    * Soft USD cap on session spend. Undefined → no cap (default).
    * The loop warns once at 80% and refuses to start a new turn at
@@ -298,6 +297,8 @@ export interface ChatOptions {
      * then falls back to non-tool updates only).
      */
     reregisterTools?: (rootDir: string) => void;
+    /** Async tail of `/cwd` — re-probe the new dir for a semantic index. */
+    reBootstrapSemantic?: (rootDir: string) => Promise<{ enabled: boolean }>;
   };
   /** Skip the session picker — assume "Resume" (backwards-compatible auto-continue). */
   forceResume?: boolean;
@@ -403,8 +404,6 @@ function Root({
         model={appProps.model}
         system={appProps.system}
         transcript={appProps.transcript}
-        harvest={appProps.harvest}
-        branch={appProps.branch}
         budgetUsd={appProps.budgetUsd}
         session={activeSession}
         tools={tools}
@@ -421,8 +420,10 @@ function Root({
 }
 
 export async function chatCommand(opts: ChatOptions): Promise<void> {
+  markPhase("chat_command_enter");
   loadDotenv();
   const initialKey = loadApiKey();
+  markPhase("config_loaded");
 
   const requestedSpecs = opts.mcp ?? [];
   // Shared progress sink: the bridge's onProgress callback writes
@@ -445,9 +446,15 @@ export async function chatCommand(opts: ChatOptions): Promise<void> {
   });
 
   const failedSpecs: Array<{ spec: string; reason: string }> = [];
+  if (requestedSpecs.length > 0) markPhase("mcp_launch");
   for (const raw of requestedSpecs) {
     const result = await runtime.addSpec(raw);
     if (!result.ok) failedSpecs.push({ spec: raw, reason: result.reason });
+  }
+  if (requestedSpecs.length > 0) {
+    markPhase(
+      `mcp_connected_${requestedSpecs.length - failedSpecs.length}_of_${requestedSpecs.length}`,
+    );
   }
   if (runtime.size() === 0 && !opts.seedTools) {
     tools = undefined;
@@ -496,6 +503,7 @@ export async function chatCommand(opts: ChatOptions): Promise<void> {
   const showPicker =
     !opts.session && !opts.forceResume && listSessionsForWorkspace(launchWorkspace).length > 0;
 
+  markPhase("ink_render_call");
   const { waitUntilExit } = render(
     <Root
       initialKey={initialKey}

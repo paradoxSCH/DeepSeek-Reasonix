@@ -30,6 +30,8 @@ import { JobRegistry } from "../../tools/jobs.js";
 import { registerMemoryTools } from "../../tools/memory.js";
 import { registerPlanTool } from "../../tools/plan.js";
 import { registerShellTools } from "../../tools/shell.js";
+import { registerTodoTool } from "../../tools/todo.js";
+import { markPhase } from "../startup-profile.js";
 import { chatCommand } from "./chat.js";
 
 export interface CodeOptions {
@@ -45,15 +47,6 @@ export interface CodeOptions {
   forceResume?: boolean;
   /** Skip the session picker — always wipe prior messages and start fresh. */
   forceNew?: boolean;
-  /**
-   * Opt into Pillar 2 harvesting (extracts a typed plan state from R1
-   * reasoning via an extra V3 call). Default OFF in code mode — the
-   * displayed subgoals/hypotheses/rejectedPaths have no programmatic
-   * consumer, only `uncertainties.length` feeds branching, and the
-   * extra V3 call adds ~10-15% per-turn cost. Users who want the
-   * reasoning surfaced explicitly can pass `--harvest`.
-   */
-  harvest?: boolean;
   /**
    * Soft USD spend cap. Off by default. Same semantics as `chat`:
    * warns at 80%, refuses next turn at 100%. Mid-session adjustable
@@ -71,6 +64,7 @@ export interface CodeOptions {
 }
 
 export async function codeCommand(opts: CodeOptions = {}): Promise<void> {
+  markPhase("code_command_enter");
   const { codeSystemPrompt } = await import("../../code/prompt.js");
   const rootDir = resolve(opts.dir ?? process.cwd());
   // Per-directory session so switching projects doesn't mix histories.
@@ -115,6 +109,16 @@ export async function codeCommand(opts: CodeOptions = {}): Promise<void> {
     // per-project memory store; the global scope is shared across runs.
     registerMemoryTools(tools, { projectRoot: root });
   };
+  // Async tail to `registerRootedTools`. Kept separate because the FS /
+  // shell / memory re-registration above is sync and must happen before
+  // the next tool dispatch, while semantic-index probing reads disk and
+  // can race ahead in the background. On `/cwd`, App.tsx fires this
+  // after the sync swap and surfaces the result via postInfo.
+  const reBootstrapSemantic = async (root: string): Promise<{ enabled: boolean }> => {
+    const result = await bootstrapSemanticSearchInCodeMode(tools, root);
+    if (!result.enabled) tools.unregister("semantic_search");
+    return result;
+  };
   registerRootedTools(rootDir);
   // `submit_plan` is always in the spec list so the prefix cache stays
   // stable across plan-mode toggles (Pillar 1). The tool itself is a
@@ -127,6 +131,9 @@ export async function codeCommand(opts: CodeOptions = {}): Promise<void> {
   // menu into a submit_plan body. Keeping it always-registered
   // preserves the prefix cache across plan-mode toggles.
   registerChoiceTool(tools);
+  // `todo_write` — lightweight in-session task tracker, no approval gate.
+  // Independent of plan mode (readOnly=true so it stays callable in /plan).
+  registerTodoTool(tools);
   // `run_skill` is intentionally NOT registered here — App.tsx wires it
   // up with the subagent runner attached, so `runAs: subagent` skills
   // can spawn isolated child loops. Doing it here would mean the App's
@@ -137,7 +144,11 @@ export async function codeCommand(opts: CodeOptions = {}): Promise<void> {
   // on-disk index already exists, skips entirely otherwise. Setup
   // happens via the explicit `reasonix index` command — never
   // by surprise on launch.
-  const semantic = await bootstrapSemanticSearchInCodeMode(tools, rootDir);
+  markPhase("semantic_bootstrap_start");
+  const semantic = await reBootstrapSemantic(rootDir);
+  markPhase(
+    semantic.enabled ? "semantic_bootstrap_done_enabled" : "semantic_bootstrap_done_skipped",
+  );
 
   process.stderr.write(
     `▸ reasonix code: rooted at ${rootDir}, session "${session ?? "(ephemeral)"}" · ${tools.size} native tool(s)${
@@ -177,7 +188,6 @@ export async function codeCommand(opts: CodeOptions = {}): Promise<void> {
 
   await chatCommand({
     model: opts.model ?? "deepseek-v4-flash",
-    harvest: opts.harvest ?? false,
     budgetUsd: opts.budgetUsd,
     system: codeSystemPrompt(rootDir, {
       hasSemanticSearch: semantic.enabled,
@@ -187,7 +197,12 @@ export async function codeCommand(opts: CodeOptions = {}): Promise<void> {
     transcript: opts.transcript,
     session,
     seedTools: tools,
-    codeMode: { rootDir, jobs, reregisterTools: registerRootedTools },
+    codeMode: {
+      rootDir,
+      jobs,
+      reregisterTools: registerRootedTools,
+      reBootstrapSemantic,
+    },
     mcp: readConfig().mcp,
     forceResume: opts.forceResume,
     forceNew: opts.forceNew,

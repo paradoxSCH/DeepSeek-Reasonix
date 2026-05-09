@@ -14,6 +14,7 @@ export {
 export {
   AT_MENTION_PATTERN,
   AT_PICKER_PREFIX,
+  DEFAULT_AT_DIR_MAX_ENTRIES,
   DEFAULT_AT_MENTION_MAX_BYTES,
   DEFAULT_PICKER_IGNORE_DIRS,
   detectAtPicker,
@@ -35,18 +36,8 @@ export type {
   CacheFirstLoopOptions,
   LoopEvent,
   EventRole,
-  BranchSummary,
-  BranchProgress,
   ReconfigurableOptions,
 } from "./loop.js";
-
-export { runBranches, defaultSelector, aggregateBranchUsage } from "./consistency.js";
-export type {
-  BranchOptions,
-  BranchSample,
-  BranchResult,
-  BranchSelector,
-} from "./consistency.js";
 
 export { ImmutablePrefix, AppendOnlyLog, VolatileScratch } from "./memory/runtime.js";
 export type { ImmutablePrefixOptions } from "./memory/runtime.js";
@@ -92,6 +83,8 @@ export {
   registerPlanTool,
 } from "./tools/plan.js";
 export type { PlanStep, PlanStepRisk, PlanToolOptions, StepCompletion } from "./tools/plan.js";
+export { registerTodoTool } from "./tools/todo.js";
+export type { TodoItem, TodoStatus, TodoToolOptions } from "./tools/todo.js";
 export { forkRegistryExcluding, registerSubagentTool } from "./tools/subagent.js";
 export type {
   SubagentEvent,
@@ -156,9 +149,6 @@ export type {
   TruncationRepairResult,
   FlattenDecision,
 } from "./repair/index.js";
-
-export { harvest, emptyPlanState, isPlanStateEmpty } from "./harvest.js";
-export type { TypedPlanState, HarvestOptions } from "./harvest.js";
 
 export {
   appendSessionMessage,

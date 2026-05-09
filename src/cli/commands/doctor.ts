@@ -1,15 +1,16 @@
 /** Plain-text (not Ink) — must work when everything else is broken. fail → exit 1; warn → exit 0. */
 
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { DeepSeekClient } from "../../client.js";
-import { defaultConfigPath, readConfig } from "../../config.js";
+import { defaultConfigPath, readConfig, resolveSemanticEmbeddingConfig } from "../../config.js";
 import { loadDotenv } from "../../env.js";
 import { loadHooks } from "../../hooks.js";
 import { indexExists } from "../../index/semantic/builder.js";
 import { checkOllamaStatus } from "../../index/semantic/ollama-launcher.js";
 import { listSessions } from "../../memory/session.js";
+import { resolveDataPath } from "../../tokenizer.js";
 import { VERSION } from "../../version.js";
 
 export type DoctorLevel = "ok" | "warn" | "fail";
@@ -169,32 +170,20 @@ async function checkApiReach(): Promise<Check> {
 }
 
 async function checkTokenizer(): Promise<Check> {
-  // The tokenizer file is the gzipped vocab shipped under data/. We
-  // resolve relative to the package's dist/ rather than process.cwd()
-  // — the same logic the runtime uses when loading on first count.
-  const candidates = [
-    join(
-      dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")),
-      "..",
-      "..",
-      "..",
-      "data",
-      "deepseek-tokenizer.json.gz",
-    ),
-    join(process.cwd(), "data", "deepseek-tokenizer.json.gz"),
-  ];
-  for (const p of candidates) {
-    if (existsSync(p)) {
-      try {
-        const stat = statSync(p);
-        return {
-          label: "tokenizer    ",
-          level: "ok",
-          detail: `${p} (${fmtBytes(stat.size)})`,
-        };
-      } catch {
-        /* try next */
-      }
+  // Reuse the runtime's resolver so the doctor never disagrees with what
+  // the tokenizer actually loads — three candidates including a global
+  // npm install probe via createRequire.
+  const path = resolveDataPath();
+  if (existsSync(path)) {
+    try {
+      const stat = statSync(path);
+      return {
+        label: "tokenizer    ",
+        level: "ok",
+        detail: `${path} (${fmtBytes(stat.size)})`,
+      };
+    } catch {
+      /* fall through to warn */
     }
   }
   return {
@@ -259,9 +248,6 @@ async function checkHooks(projectRoot: string): Promise<Check> {
 }
 
 async function checkOllama(projectRoot: string): Promise<Check> {
-  // Ollama is only meaningful when an index has been built — otherwise
-  // the daemon being down is just noise. Skip the check entirely on
-  // projects that don't use semantic search.
   let exists = false;
   try {
     exists = await indexExists(projectRoot);
@@ -270,45 +256,79 @@ async function checkOllama(projectRoot: string): Promise<Check> {
   }
   if (!exists) {
     return {
-      label: "ollama       ",
+      label: "semantic     ",
       level: "ok",
       detail: "not in use (no semantic index built; `reasonix index` to enable)",
     };
   }
+  const meta = readSemanticMeta(projectRoot);
+  if (meta?.provider === "openai-compat") {
+    const resolved = resolveSemanticEmbeddingConfig();
+    if (resolved.provider !== "openai-compat") {
+      return {
+        label: "semantic     ",
+        level: "warn",
+        detail: `index uses openai-compat/${meta.model} but current config resolves to ${resolved.provider}/${resolved.model} — rebuild before searching`,
+      };
+    }
+    return {
+      label: "semantic     ",
+      level: "ok",
+      detail: `openai-compat · ${resolved.baseUrl} · model ${resolved.model} · api key configured`,
+    };
+  }
   try {
-    const status = await checkOllamaStatus(process.env.REASONIX_EMBED_MODEL ?? "nomic-embed-text");
+    const model = meta?.model || process.env.REASONIX_EMBED_MODEL || "nomic-embed-text";
+    const status = await checkOllamaStatus(model);
     if (!status.binaryFound) {
       return {
-        label: "ollama       ",
+        label: "semantic     ",
         level: "warn",
-        detail: "binary not on PATH — semantic_search will fail; install from https://ollama.com",
+        detail:
+          "ollama binary not on PATH — semantic_search will fail; install from https://ollama.com",
       };
     }
     if (!status.daemonRunning) {
       return {
-        label: "ollama       ",
+        label: "semantic     ",
         level: "warn",
-        detail: "daemon not running — `ollama serve` (or just call /semantic in TUI to auto-start)",
+        detail:
+          "ollama daemon not running — `ollama serve` (or call /semantic in TUI to auto-start)",
       };
     }
     if (!status.modelPulled) {
       return {
-        label: "ollama       ",
+        label: "semantic     ",
         level: "warn",
         detail: `model ${status.modelName} not pulled — \`ollama pull ${status.modelName}\``,
       };
     }
     return {
-      label: "ollama       ",
+      label: "semantic     ",
       level: "ok",
-      detail: `daemon up · model ${status.modelName} ready`,
+      detail: `ollama daemon up · model ${status.modelName} ready`,
     };
   } catch (err) {
     return {
-      label: "ollama       ",
+      label: "semantic     ",
       level: "warn",
       detail: `probe failed — ${(err as Error).message}`,
     };
+  }
+}
+
+function readSemanticMeta(
+  projectRoot: string,
+): { provider: "ollama" | "openai-compat"; model: string } | null {
+  try {
+    const raw = readFileSync(join(projectRoot, ".reasonix", "semantic", "index.meta.json"), "utf8");
+    const parsed = JSON.parse(raw) as { provider?: string; model?: string };
+    return {
+      provider: parsed.provider === "openai-compat" ? "openai-compat" : "ollama",
+      model: typeof parsed.model === "string" ? parsed.model : "",
+    };
+  } catch {
+    return null;
   }
 }
 

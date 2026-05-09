@@ -32,12 +32,9 @@ export interface PromptInputProps {
   onSubmit: (v: string) => void;
   disabled?: boolean;
   placeholder?: string;
-  /** Ctrl+P / Ctrl+N — parent walks its prompt history and swaps `value` via `onChange`. */
+  /** ↑/↓ on an empty buffer or Ctrl+P / Ctrl+N — parent walks history and swaps `value` via `onChange`. */
   onHistoryPrev?: () => void;
   onHistoryNext?: () => void;
-  /** ↑/↓ on an empty buffer — parent scrolls chat history. */
-  onChatScrollUp?: () => void;
-  onChatScrollDown?: () => void;
 }
 
 export function PromptInput({
@@ -48,8 +45,6 @@ export function PromptInput({
   placeholder,
   onHistoryPrev,
   onHistoryNext,
-  onChatScrollUp,
-  onChatScrollDown,
 }: PromptInputProps) {
   // Cap at 24 — collapseLinesForDisplay hides content past ~20 logical lines.
   // Quantize spec.max to 4-row buckets so per-keystroke line-count changes
@@ -146,8 +141,6 @@ export function PromptInput({
     }
     if (action.historyHandoff === "prev") onHistoryPrev?.();
     if (action.historyHandoff === "next") onHistoryNext?.();
-    if (action.chatScrollHandoff === "up") onChatScrollUp?.();
-    if (action.chatScrollHandoff === "down") onChatScrollDown?.();
   }, !disabled);
 
   // ── Render ──────────────────────────────────────────────────────
@@ -163,7 +156,7 @@ export function PromptInput({
   // a just-cleared buffer and read as residual typed input on dim-poor terminals.
   const effectivePlaceholder = disabled
     ? (placeholder ?? "…waiting for response…")
-    : (placeholder ?? "type a message · slash for commands · at-sign for files");
+    : (placeholder ?? "ask anything  ·  slash for commands  ·  at-sign for files");
 
   const lines = value.length > 0 ? value.split("\n") : [""];
   const accentColor = disabled ? FG.faint : TONE.brand;
@@ -295,15 +288,35 @@ export function PromptInput({
       ) : null}
       {!disabled ? (
         <Box marginTop={1}>
-          <Text color={FG.faint}>
-            {"  ⏎ send  ·  shift/alt+⏎ newline  ·  ↑↓ history  ·  esc abort  ·  ctrl-c quit"}
-          </Text>
+          <HintRow />
         </Box>
       ) : (
         <Box marginTop={1}>
           <Text color={FG.faint}>{"  esc to stop"}</Text>
         </Box>
       )}
+    </Box>
+  );
+}
+
+function HintRow(): React.ReactElement {
+  const items: Array<{ key: string; sep: string }> = [
+    { key: "⏎", sep: "send" },
+    { key: "⇧⏎", sep: "newline" },
+    { key: "↑↓", sep: "history" },
+    { key: "esc", sep: "abort" },
+    { key: "^C", sep: "quit" },
+  ];
+  return (
+    <Box flexDirection="row">
+      <Text>{"  "}</Text>
+      {items.map((item, i) => (
+        <React.Fragment key={item.key}>
+          {i > 0 && <Text color={FG.faint}>{"  ·  "}</Text>}
+          <Text color={FG.meta}>{item.key}</Text>
+          <Text color={FG.faint}>{` ${item.sep}`}</Text>
+        </React.Fragment>
+      ))}
     </Box>
   );
 }

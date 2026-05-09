@@ -1,4 +1,5 @@
-import type { WriteStream } from "node:fs";
+import { type WriteStream, statSync } from "node:fs";
+import { resolve } from "node:path";
 import { Box, Text, useStdout } from "ink";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -39,6 +40,7 @@ import {
   markEditModeHintShown,
   resolveThemePreference,
   saveEditMode,
+  saveReasoningEffort,
 } from "../../config.js";
 import { Eventizer } from "../../core/eventize.js";
 import { pauseGate } from "../../core/pause-gate.js";
@@ -63,7 +65,8 @@ import type {
   PickerResolution,
   SubmitResult,
 } from "../../server/context.js";
-import { type DashboardServerHandle, startDashboardServer } from "../../server/index.js";
+import type { DashboardServerHandle } from "../../server/index.js";
+import { loadSlashUsage, recordSlashUse } from "../../slash-usage.js";
 import {
   DEEPSEEK_CONTEXT_TOKENS,
   DEFAULT_CONTEXT_TOKENS,
@@ -78,6 +81,7 @@ import { registerSkillTools } from "../../tools/skills.js";
 import { formatSubagentResult, spawnSubagent } from "../../tools/subagent.js";
 import { webFetch } from "../../tools/web.js";
 import { openTranscriptFile } from "../../transcript/log.js";
+import { dumpStartupProfile, markPhase } from "../startup-profile.js";
 import { AtMentionSuggestions } from "./AtMentionSuggestions.js";
 import { CheckpointPicker } from "./CheckpointPicker.js";
 import { ChoiceConfirm, type ChoiceConfirmChoice } from "./ChoiceConfirm.js";
@@ -136,7 +140,7 @@ import { applyMcpAppend } from "./mcp-append.js";
 import { handleMcpBrowseSlash } from "./mcp-browse.js";
 import { replaceMcpServerSummary } from "./mcp-server-list.js";
 import { formatLongPaste } from "./paste-collapse.js";
-import { resolvePreset } from "./presets.js";
+import { PRESETS, resolvePreset } from "./presets.js";
 import { type McpServerSummary, handleSlash, parseSlash, suggestSlashCommands } from "./slash.js";
 import { TurnTranslator } from "./state/TurnTranslator.js";
 import { cardsToDashboardMessages } from "./state/cards-to-messages.js";
@@ -154,8 +158,6 @@ export interface AppProps {
   model: string;
   system: string;
   transcript?: string;
-  harvest?: boolean;
-  branch?: number;
   /** Soft USD spend cap; undefined → no cap. See CacheFirstLoopOptions.budgetUsd. */
   budgetUsd?: number;
   session?: string;
@@ -206,6 +208,14 @@ export interface AppProps {
      * with file/shell tools still pointing at the original root.
      */
     reregisterTools?: (rootDir: string) => void;
+    /**
+     * Async tail of the `/cwd` swap — re-probes the new directory for a
+     * compatible semantic index, registers `semantic_search` against it
+     * if found, unregisters the stale binding otherwise. Kept separate
+     * from `reregisterTools` so the sync FS/shell/memory re-registration
+     * isn't blocked on disk I/O.
+     */
+    reBootstrapSemantic?: (rootDir: string) => Promise<{ enabled: boolean }>;
   };
   /**
    * When `true`, suppress the auto-launch of the embedded web dashboard
@@ -276,6 +286,7 @@ interface StreamingState {
 }
 
 export function App(props: AppProps): React.ReactElement {
+  markPhase("app_render_start");
   const session = useAgentSession({
     sessionId: props.session,
     model: props.model,
@@ -299,8 +310,6 @@ function AppInner({
   model,
   system,
   transcript,
-  harvest,
-  branch,
   budgetUsd,
   session,
   tools,
@@ -312,6 +321,7 @@ function AppInner({
   noDashboard,
   onSwitchSession,
 }: AppProps) {
+  markPhase("app_inner_start");
   const log = useScrollback();
   const agentStore = useAgentStore();
   const hasConversation = useAgentState((s) =>
@@ -321,6 +331,9 @@ function AppInner({
   const chatScroll = useChatScroll();
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const [slashUsage, setSlashUsage] = useState<Readonly<Record<string, number>>>(() =>
+    loadSlashUsage(),
+  );
   // ctrl-o toggles full-tail view on the live streaming card.
   // Auto-resets at the end of every turn so the next reply starts collapsed.
   const [liveExpand, setLiveExpand] = useState(false);
@@ -329,6 +342,10 @@ function AppInner({
   }, [isStreaming, liveExpand]);
   const [languageVersion, setLanguageVersion] = useState(0);
   useEffect(() => onLanguageChange(() => setLanguageVersion((v) => v + 1)), []);
+  useEffect(() => {
+    markPhase("first_paint");
+    dumpStartupProfile();
+  }, []);
   // Live MCP server list: initialized from the boot-time prop, then
   // updated immutably when append-drift adds tools mid-session.
   const [liveMcpServers, setLiveMcpServers] = useState<McpServerSummary[]>(() => mcpServers ?? []);
@@ -410,9 +427,9 @@ function AppInner({
   // the workspace mid-session; the prop `codeMode.rootDir` stays as
   // the original launch root so it can't accidentally drift (it's
   // used purely for "is this a code-mode session?" checks now).
-  // Initial-only — no setter exists, so this is effectively a const captured
-  // at first mount. Kept as state for future `/cwd` mid-session retargeting.
-  const [currentRootDir] = useState<string>(() => codeMode?.rootDir ?? process.cwd());
+  const [currentRootDir, setCurrentRootDir] = useState<string>(
+    () => codeMode?.rootDir ?? process.cwd(),
+  );
   // Loaded user hooks (project + global settings.json). Stays mutable
   // so `/hooks reload` and `/cwd` can rescan disk without
   // reconstructing the loop. The loop holds a parallel reference for
@@ -659,14 +676,6 @@ function AppInner({
   // synced in a useEffect once handleSubmit is defined.
   const handleSubmitRef = useRef<((raw: string) => Promise<void>) | null>(null);
   const busyRef = useRef<boolean>(false);
-  // Full untruncated tool results, in arrival order. ToolCard clips
-  // output at 400 chars for display; `/tool N` reads from this ref to
-  // show the real thing. Not persisted — a
-  // resumed session replays the log (which has the same content in
-  // `tool` messages) but we don't repopulate this ref on resume
-  // because the user wouldn't expect `/tool` to reach back across
-  // process boundaries.
-  const toolHistoryRef = useRef<Array<{ toolName: string; text: string }>>([]);
   // Embedded dashboard server handle. Set when /dashboard boots; null
   // otherwise. Mutations to this ref happen inside the start/stop
   // callbacks; the slash handler uses getDashboardUrl() to surface
@@ -825,8 +834,6 @@ function AppInner({
       prefix,
       tools,
       model,
-      harvest,
-      branch,
       budgetUsd,
       session,
       hooks: hookList,
@@ -838,7 +845,7 @@ function AppInner({
     });
     loopRef.current = l;
     return l;
-  }, [model, system, harvest, branch, budgetUsd, session, tools, codeMode]);
+  }, [model, system, budgetUsd, session, tools, codeMode]);
 
   useEffect(() => {
     if (!session || !tools) return;
@@ -1085,6 +1092,8 @@ function AppInner({
     slashMatches,
     slashSelected,
     setSlashSelected,
+    slashGroupMode,
+    slashAdvancedHidden,
     atPicker,
     atMatches,
     atSelected,
@@ -1103,6 +1112,7 @@ function AppInner({
     rootDir: currentRootDir,
     models,
     mcpServers: liveMcpServers,
+    slashUsage,
   });
 
   // Wire the shared progressSink so the bridge's onProgress → us.
@@ -1191,16 +1201,14 @@ function AppInner({
   // Esc handles "abort the current turn" separately; Ctrl+C is the universal "I'm done" key.
   const quitProcess = useQuit(transcriptRef);
 
-  // PgUp / PgDn always scroll chat history; ↑/↓-on-empty-buffer also
-  // routes here via PromptInput's chatScrollHandoff. WT translates wheel
-  // events to ↑/↓ in raw mode, so this is what makes wheel-scroll work.
+  // PgUp / PgDn always scroll chat history. ↑/↓ also reaches here when
+  // PromptInput can't act on it: while busy (disabled) or once chat is
+  // unpinned (user already scrolling). When pinned + idle, PromptInput
+  // owns arrows — empty buffer recalls history, otherwise cursor motion.
   useKeystroke((ev) => {
     if (ev.pageUp) chatScroll.scrollUp();
     else if (ev.pageDown) chatScroll.scrollDown();
     else if (ev.end) chatScroll.jumpToBottom();
-    // Wheel-translated ↑/↓ has nowhere to go when PromptInput can't
-    // process it: in reading mode (unmounted) or while busy (disabled).
-    // When pinned + idle, PromptInput owns arrows for cursor / handoff.
     else if ((!chatScroll.pinned || busy) && ev.upArrow) chatScroll.scrollUp();
     else if ((!chatScroll.pinned || busy) && ev.downArrow) chatScroll.scrollDown();
   }, !modalOpen);
@@ -1605,11 +1613,6 @@ function AppInner({
     [tools],
   );
 
-  /** Clear the pending-plan picker state; safe to call unconditionally. */
-  const clearPendingPlan = useCallback(() => {
-    setPendingPlan(null);
-  }, []);
-
   const {
     startLoop,
     stopLoop,
@@ -1646,6 +1649,7 @@ function AppInner({
     if (dashboardRef.current) return dashboardRef.current.url;
     if (dashboardStartingRef.current) return dashboardStartingRef.current;
     const startup = (async () => {
+      const { startDashboardServer } = await import("../../server/index.js");
       const handle = await startDashboardServer({
         mode: "attached",
         configPath: defaultConfigPath(),
@@ -2158,6 +2162,14 @@ function AppInner({
 
       const slash = parseSlash(text);
       if (slash) {
+        const sink = eventSinkRef.current;
+        const eventizer = eventizerRef.current;
+        if (sink && eventizer) {
+          sink.append(
+            eventizer.emitSlashInvoked(loop.currentTurn, slash.cmd, slash.args.join(" ")),
+          );
+        }
+        setSlashUsage(recordSlashUse(slash.cmd));
         const result = handleSlash(slash.cmd, slash.args, loop, {
           mcpSpecs,
           mcpServers: liveMcpServers,
@@ -2168,11 +2180,9 @@ function AppInner({
           codeShowEdit: codeMode ? codeShowEdit : undefined,
           codeRoot: codeMode ? currentRootDir : undefined,
           pendingEditCount: codeMode ? pendingEdits.current.length : undefined,
-          toolHistory: () => toolHistoryRef.current,
           memoryRoot: currentRootDir,
           planMode,
           setPlanMode: codeMode ? togglePlanMode : undefined,
-          clearPendingPlan: codeMode ? clearPendingPlan : undefined,
           editMode: codeMode ? editMode : undefined,
           setEditMode: codeMode ? setEditMode : undefined,
           touchedFiles: codeMode
@@ -2211,6 +2221,42 @@ function AppInner({
             setHookList(fresh);
             return fresh.length;
           },
+          switchCwd: codeMode?.reregisterTools
+            ? (newPath: string) => {
+                const resolved = resolve(newPath);
+                let stat: ReturnType<typeof statSync>;
+                try {
+                  stat = statSync(resolved);
+                } catch (err) {
+                  return { ok: false, info: `/cwd: ${(err as Error).message}` };
+                }
+                if (!stat.isDirectory()) {
+                  return { ok: false, info: `/cwd: ${resolved} is not a directory` };
+                }
+                codeMode.reregisterTools?.(resolved);
+                setCurrentRootDir(resolved);
+                const fresh = loadHooks({ projectRoot: resolved });
+                setHookList(fresh);
+                const reBootstrap = codeMode.reBootstrapSemantic;
+                if (reBootstrap) {
+                  void reBootstrap(resolved).then(
+                    (r) => {
+                      log.pushInfo(
+                        r.enabled
+                          ? `▸ semantic_search re-pointed at ${resolved}`
+                          : `▸ semantic_search disabled (no compatible index in ${resolved})`,
+                      );
+                    },
+                    (err) => {
+                      log.pushInfo(
+                        `▸ semantic_search re-bootstrap failed: ${(err as Error).message}`,
+                      );
+                    },
+                  );
+                }
+                return { ok: true, info: `▸ workspace switched to ${resolved}` };
+              }
+            : undefined,
           reloadMcp: mcpRuntime
             ? async () => {
                 const r = await mcpRuntime.reloadFromConfig(loop);
@@ -2330,7 +2376,6 @@ function AppInner({
       const contentBuf = { current: "" };
       const reasoningBuf = { current: "" };
       const translator = new TurnTranslator(log);
-      let branchCardId: string | null = null;
       // Coalesces tool_call_delta events into one re-render per flush tick.
       const toolCallBuildBuf: {
         current: {
@@ -2392,7 +2437,13 @@ function AppInner({
           modelInput = expanded.text;
           const inlined = expanded.expansions
             .filter((ex) => ex.ok)
-            .map((ex) => `${ex.path} (${(ex.bytes ?? 0).toLocaleString()} bytes)`);
+            .map((ex) => {
+              if (ex.isDirectory) {
+                const trunc = ex.truncated ? "+" : "";
+                return `${ex.path}/ (${ex.entries ?? 0}${trunc} entries)`;
+              }
+              return `${ex.path} (${(ex.bytes ?? 0).toLocaleString()} bytes)`;
+            });
           const skipped = expanded.expansions
             .filter((ex) => !ex.ok)
             .map((ex) => `${ex.path} (${ex.skip})`);
@@ -2484,19 +2535,6 @@ function AppInner({
                 readyCount: ev.toolCallReadyCount,
               };
             }
-          } else if (ev.role === "branch_start") {
-            if (ev.branchProgress) {
-              branchCardId = log.startBranch(ev.branchProgress.total);
-            }
-          } else if (ev.role === "branch_progress") {
-            if (branchCardId && ev.branchProgress) {
-              log.updateBranch(branchCardId, ev.branchProgress);
-            }
-          } else if (ev.role === "branch_done") {
-            if (branchCardId) {
-              log.endBranch(branchCardId);
-              branchCardId = null;
-            }
           } else if (ev.role === "assistant_final") {
             handleAssistantFinal(ev, {
               flush,
@@ -2554,7 +2592,6 @@ function AppInner({
               setOngoingTool,
               setToolProgress,
               toolStartedAtRef,
-              toolHistoryRef,
               setPendingShell,
               setPendingPlan,
               setPendingRevision,
@@ -2602,10 +2639,6 @@ function AppInner({
         // this, stranded done=false cards stick in CardStream's live tail.
         if (abortedThisTurn.current) {
           translator.abort();
-          if (branchCardId) {
-            log.endBranch(branchCardId, true);
-            branchCardId = null;
-          }
         }
         setOngoingTool(null);
         setToolProgress(null);
@@ -2621,7 +2654,6 @@ function AppInner({
     },
     [
       busy,
-      clearPendingPlan,
       codeApply,
       codeDiscard,
       codeHistory,
@@ -2837,6 +2869,23 @@ function AppInner({
       let marker: string;
       if (staged.mode === "approve") {
         togglePlanMode(false);
+        // Materialize the approved plan as an "active" card so PlanLiveRow
+        // can dock it at the bottom — without this dispatch, no card with
+        // variant: "active" exists and the live strip stays empty.
+        const approvedSteps = planStepsRef.current;
+        if (approvedSteps && approvedSteps.length > 0) {
+          completedStepIdsRef.current = new Set();
+          log.showPlan({
+            title: planSummaryRef.current ?? "plan",
+            steps: approvedSteps.map((s) => ({
+              id: s.id,
+              title: s.title,
+              status: "queued" as const,
+            })),
+            variant: "active",
+          });
+          persistPlanState();
+        }
         if (trimmed) {
           synthetic = `The plan above has been approved. Implement it now. You are out of plan mode — use edit_file / write_file / run_command as needed.\n\nUser's additional instructions / answers to your open questions:\n\n${trimmed}\n\nFactor these in before the first edit. Stick to the plan unless you discover a concrete reason to deviate; if you do, tell me and wait for a response.`;
           marker = `▸ plan approved + instructions — ${trimmed.length > 50 ? `${trimmed.slice(0, 50)}…` : trimmed}`;
@@ -2888,7 +2937,7 @@ function AppInner({
         }
       }
     },
-    [stagedInput, togglePlanMode, persistPlanState, agentStore],
+    [stagedInput, togglePlanMode, persistPlanState, agentStore, log],
   );
   // Ref-mirror so startDashboard's resolvePlanConfirm closure can call
   // the latest function — handleStagedInputSubmit's deps churn on every
@@ -2959,9 +3008,14 @@ function AppInner({
             kind: request.kind,
           });
           break;
-        case "plan_proposed":
-          setPendingPlan((payload as { plan: string }).plan);
+        case "plan_proposed": {
+          const p = payload as { plan: string; steps?: PlanStep[]; summary?: string };
+          setPendingPlan(p.plan);
+          planStepsRef.current = p.steps ?? null;
+          planSummaryRef.current = p.summary ?? null;
+          planBodyRef.current = p.plan;
           break;
+        }
         case "plan_checkpoint": {
           const p = payload as {
             stepId: string;
@@ -2972,6 +3026,14 @@ function AppInner({
           // completed/total come from planStepsRef — don't have them via gate
           const completed = completedStepIdsRef.current.size;
           const total = planStepsRef.current?.length ?? 0;
+          // auto/yolo: user opted out of checkpoints — resolve "continue"
+          // without prompting. Per-step rollback snapshot still runs so
+          // /restore granularity is preserved.
+          if (editModeRef.current === "auto" || editModeRef.current === "yolo") {
+            handleAutoCheckpointContinueRef.current(p.stepId, p.title);
+            pauseGate.resolve(request.id, { type: "continue" });
+            break;
+          }
           setPendingCheckpoint({
             stepId: p.stepId,
             title: p.title,
@@ -3085,6 +3147,37 @@ function AppInner({
   useEffect(() => {
     handleCheckpointConfirmRef.current = handleCheckpointConfirm;
   }, [handleCheckpointConfirm]);
+
+  const handleAutoCheckpointContinue = useCallback(
+    (stepId: string, title?: string) => {
+      if (codeMode) {
+        const paths = touchedPaths();
+        if (paths.length > 0) {
+          try {
+            const cpName = title ? `${stepId} · ${title}` : stepId;
+            createCheckpoint({
+              rootDir: codeMode.rootDir,
+              name: cpName.slice(0, 60),
+              paths,
+              source: "auto-pre-restore",
+            });
+          } catch {
+            /* best-effort */
+          }
+        }
+      }
+      const completed = completedStepIdsRef.current.size;
+      const total = planStepsRef.current?.length ?? 0;
+      const label = title ? `${stepId} · ${title}` : stepId;
+      const counter = total > 0 ? ` (${completed}/${total})` : "";
+      log.pushInfo(t("app.continuingAfter", { label, counter }));
+    },
+    [codeMode, touchedPaths, log],
+  );
+  const handleAutoCheckpointContinueRef = useRef(handleAutoCheckpointContinue);
+  useEffect(() => {
+    handleAutoCheckpointContinueRef.current = handleAutoCheckpointContinue;
+  }, [handleAutoCheckpointContinue]);
   const stableHandleCheckpointConfirm = useCallback(
     (choice: "continue" | "revise" | "stop") => handleCheckpointConfirmRef.current(choice),
     [],
@@ -3174,9 +3267,21 @@ function AppInner({
       }
       planStepsRef.current = merged;
       persistPlanState();
+      // Replace the live active card so PlanLiveRow shows the new tail —
+      // existing card's stale ids would fail subsequent step completes.
+      agentStore.dispatch({ type: "plan.drop" });
+      log.showPlan({
+        title: planSummaryRef.current ?? "plan",
+        steps: merged.map((s) => ({
+          id: s.id,
+          title: s.title,
+          status: completed.has(s.id) ? ("done" as const) : ("queued" as const),
+        })),
+        variant: "active",
+      });
       if (gateId !== null) pauseGate.resolve(gateId, { type: "accepted" });
     },
-    [pendingRevision, persistPlanState],
+    [pendingRevision, persistPlanState, agentStore, log],
   );
 
   // Ref-wrap to keep PlanReviseConfirm's React.memo from re-rendering.
@@ -3456,6 +3561,8 @@ function AppInner({
                 <ModelPicker
                   models={models}
                   current={loop.model}
+                  currentEffort={loop.reasoningEffort}
+                  currentAutoEscalate={loop.autoEscalate}
                   onRefresh={refreshModels}
                   onChoose={(outcome) => {
                     setPendingModelPicker(false);
@@ -3463,6 +3570,22 @@ function AppInner({
                       loop.configure({ model: outcome.id });
                       agentStore.dispatch({ type: "session.model.change", model: outcome.id });
                       log.pushInfo(`▸ model: ${outcome.id}`);
+                      return;
+                    }
+                    if (outcome.kind === "preset") {
+                      const p = PRESETS[outcome.name];
+                      loop.configure({
+                        model: p.model,
+                        autoEscalate: p.autoEscalate,
+                        reasoningEffort: p.reasoningEffort,
+                      });
+                      agentStore.dispatch({ type: "session.model.change", model: p.model });
+                      try {
+                        saveReasoningEffort(p.reasoningEffort);
+                      } catch {
+                        /* disk full / perms — runtime change still took effect */
+                      }
+                      log.pushInfo(`▸ preset: ${outcome.name} · ${p.model}`);
                     }
                   }}
                 />
@@ -3568,11 +3691,14 @@ function AppInner({
                     disabled={busy}
                     onHistoryPrev={recallPrev}
                     onHistoryNext={recallNext}
-                    onChatScrollUp={chatScroll.scrollUp}
-                    onChatScrollDown={chatScroll.scrollDown}
                   />
                   {slashMatches !== null ? (
-                    <SlashSuggestions matches={slashMatches} selectedIndex={slashSelected} />
+                    <SlashSuggestions
+                      matches={slashMatches}
+                      selectedIndex={slashSelected}
+                      groupMode={slashGroupMode}
+                      advancedHidden={slashAdvancedHidden}
+                    />
                   ) : null}
                   {atMatches !== null ? (
                     <AtMentionSuggestions
