@@ -874,9 +874,7 @@ describe("normalizeWindowsEnvVars", () => {
     );
 
     expect(out.PATH).toBeUndefined();
-    expect(out.Path).toBe(
-      "C:\\Users\\me\\bin;C:\\Windows\\System32;C:\\Program Files\\Go\\bin",
-    );
+    expect(out.Path).toBe("C:\\Users\\me\\bin;C:\\Windows\\System32;C:\\Program Files\\Go\\bin");
     expect(out.Foo).toBe("bar");
   });
 
