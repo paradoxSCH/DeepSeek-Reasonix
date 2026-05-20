@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { stdin } from "node:process";
 import { createInterface } from "node:readline";
+import { toApprovalPrompt } from "@reasonix/core-utils";
 import {
   type FileWithStats,
   listDirectory,
@@ -261,6 +262,7 @@ interface ConfirmRequiredEvent {
   id: number;
   kind: "run_command" | "run_background";
   command: string;
+  prompt?: import("@reasonix/core-utils").ApprovalPrompt;
 }
 
 interface PathAccessRequiredEvent {
@@ -271,6 +273,7 @@ interface PathAccessRequiredEvent {
   toolName: string;
   sandboxRoot: string;
   allowPrefix: string;
+  prompt?: import("@reasonix/core-utils").ApprovalPrompt;
 }
 
 interface ChoiceRequiredEvent {
@@ -1548,9 +1551,24 @@ export async function desktopCommand(opts: DesktopOptions): Promise<void> {
       return;
     }
     if (req.kind === "run_command" || req.kind === "run_background") {
-      const payload = req.payload as { command?: string };
+      const payload = req.payload as {
+        command?: string;
+        cwd?: string;
+        timeoutSec?: number;
+        waitSec?: number;
+      };
       emit(
-        { type: "$confirm_required", id: req.id, kind: req.kind, command: payload.command ?? "" },
+        {
+          type: "$confirm_required",
+          id: req.id,
+          kind: req.kind,
+          command: payload.command ?? "",
+          prompt: toApprovalPrompt({
+            id: req.id,
+            kind: req.kind,
+            payload,
+          }),
+        },
         tabId,
       );
       if (tab) handleQQPauseRequest(tab, req.kind, payload as Record<string, unknown>);
@@ -1573,6 +1591,11 @@ export async function desktopCommand(opts: DesktopOptions): Promise<void> {
           toolName: payload.toolName,
           sandboxRoot: payload.sandboxRoot,
           allowPrefix: payload.allowPrefix,
+          prompt: toApprovalPrompt({
+            id: req.id,
+            kind: req.kind,
+            payload,
+          }),
         },
         tabId,
       );

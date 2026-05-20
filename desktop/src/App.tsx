@@ -103,6 +103,7 @@ export type PendingConfirm = {
   id: number;
   kind: "run_command" | "run_background";
   command: string;
+  prompt: import("@reasonix/core-utils").ApprovalPrompt;
 };
 
 export type PendingPathAccess = {
@@ -112,6 +113,7 @@ export type PendingPathAccess = {
   toolName: string;
   sandboxRoot: string;
   allowPrefix: string;
+  prompt: import("@reasonix/core-utils").ApprovalPrompt;
 };
 
 export type PendingChoice = {
@@ -571,7 +573,7 @@ export function applyIncoming(state: State, ev: IncomingEvent): State {
         ...state,
         pendingConfirms: [
           ...state.pendingConfirms,
-          { id: ev.id, kind: ev.kind, command: ev.command },
+          { id: ev.id, kind: ev.kind, command: ev.command, prompt: ev.prompt! },
         ],
       };
     case "$path_access_required":
@@ -586,6 +588,7 @@ export function applyIncoming(state: State, ev: IncomingEvent): State {
             toolName: ev.toolName,
             sandboxRoot: ev.sandboxRoot,
             allowPrefix: ev.allowPrefix,
+            prompt: ev.prompt!,
           },
         ],
       };
@@ -1877,7 +1880,7 @@ function TabRuntime({
                   {state.pendingConfirms.map((c) => (
                     <ConfirmApprovalCard
                       key={`cc-${c.id}`}
-                      c={c}
+                      prompt={c.prompt}
                       onAllow={() => resolveConfirm(c.id, { type: "run_once" })}
                       onAlwaysAllow={(prefix) =>
                         resolveConfirm(c.id, { type: "always_allow", prefix })
@@ -1888,7 +1891,7 @@ function TabRuntime({
                   {state.pendingPathAccess.map((p) => (
                     <PathAccessApprovalCard
                       key={`pa-${p.id}`}
-                      p={p}
+                      prompt={p.prompt}
                       onAllow={() => resolvePathAccess(p.id, { type: "run_once" })}
                       onAlwaysAllow={(prefix) =>
                         resolvePathAccess(p.id, { type: "always_allow", prefix })
