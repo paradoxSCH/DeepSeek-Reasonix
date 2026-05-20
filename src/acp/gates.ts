@@ -40,11 +40,8 @@ function acpOptionKindFor(
   }
 }
 
-/** Forward a PauseGate request as an ACP session/request_permission outbound call.
- *  Returns the verdict to pass into pauseGate.resolve.
- *
- *  Uses `toApprovalPrompt()` as the single source of truth for title, options,
- *  and tone so that changes to the permission UX only require editing one file.
+/** Forward a PauseGate request as an ACP `session/request_permission` call.
+ *  Uses `toApprovalPrompt()` as the single source of truth for UI metadata.
  */
 export async function requestPermissionForGate(
   server: AcpServer,
