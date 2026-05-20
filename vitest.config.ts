@@ -11,7 +11,11 @@ export default defineConfig({
     },
   },
   test: {
-    include: ["tests/**/*.test.ts", "tests/**/*.test.tsx"],
+    include: [
+      "tests/**/*.test.ts",
+      "tests/**/*.test.tsx",
+      "packages/core-utils/tests/**/*.test.ts",
+    ],
     setupFiles: ["tests/setup-lang.ts"],
     environment: "node",
     globals: false,
