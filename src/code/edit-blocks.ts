@@ -146,10 +146,16 @@ export function applyEditBlock(block: EditBlock, rootDir: string): ApplyResult {
           message: "SEARCH text does not match the current file content exactly",
         };
       }
-      // Replace only the first occurrence — if the model needs multiple
-      // identical edits it should emit multiple blocks (each anchored by
-      // more surrounding context). Auto-expanding to replace-all is a
-      // footgun when the same string legitimately appears in several
+      const nextIdx = content.indexOf(adaptedSearch, idx + 1);
+      if (nextIdx !== -1) {
+        return {
+          path: block.path,
+          status: "not-found",
+          message: "SEARCH text appears multiple times; include more context to disambiguate",
+        };
+      }
+      // Apply one unambiguous occurrence. Auto-expanding to replace-all is
+      // a footgun when the same string legitimately appears in several
       // unrelated places.
       const replaced = `${content.slice(0, idx)}${adaptedReplace}${content.slice(idx + adaptedSearch.length)}`;
       // Truncate first so a shorter result doesn't leave stale tail

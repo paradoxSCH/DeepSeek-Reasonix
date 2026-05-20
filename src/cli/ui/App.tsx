@@ -174,7 +174,13 @@ import { openUrl } from "./open-url.js";
 import { formatLongPaste } from "./paste-collapse.js";
 import { extractOpenQuestionsSection } from "./plan-open-questions.js";
 import { PRESETS, resolvePreset } from "./presets.js";
-import { type McpServerSummary, handleSlash, parseSlash, suggestSlashCommands } from "./slash.js";
+import {
+  type McpServerSummary,
+  type PlanModeToggleSource,
+  handleSlash,
+  parseSlash,
+  suggestSlashCommands,
+} from "./slash.js";
 import { TurnTranslator } from "./state/TurnTranslator.js";
 import { cardsToDashboardMessages } from "./state/cards-to-messages.js";
 import {
@@ -875,6 +881,7 @@ function AppInner({
   const planStepsRef = useRef<PlanStep[] | null>(null);
   const completedStepIdsRef = useRef<Set<string>>(new Set());
   const stepCompletionsRef = useRef<Map<string, StepCompletion>>(new Map());
+  const pendingStepCompletionsRef = useRef<Map<string, StepCompletion>>(new Map());
   // Markdown body + human-friendly summary captured from submit_plan.
   // Persisted alongside the structured state so a future Time-Travel
   // replay can show the model's full original proposal without re-
@@ -1582,6 +1589,7 @@ function AppInner({
         planStepsRef.current = restoredPlan.steps;
         completedStepIdsRef.current = new Set(restoredPlan.completedStepIds);
         stepCompletionsRef.current = new Map(Object.entries(restoredPlan.stepCompletions ?? {}));
+        pendingStepCompletionsRef.current = new Map();
         planBodyRef.current = restoredPlan.body ?? null;
         planSummaryRef.current = restoredPlan.summary ?? null;
         engineeringLifecycleRef.current?.recordPlanApproved(restoredPlan.steps);
@@ -1652,8 +1660,10 @@ function AppInner({
   // arrows here when the composer is hidden (chat is scrolled up and
   // InputAreaWithHistoryHint has replaced it).
   useKeystroke((ev) => {
-    if (ev.pageUp || ev.mouseScrollUp) chatScroll.scrollPageUp();
-    else if (ev.pageDown || ev.mouseScrollDown) chatScroll.scrollPageDown();
+    if (ev.pageUp) chatScroll.scrollPageUp();
+    else if (ev.pageDown) chatScroll.scrollPageDown();
+    else if (ev.mouseScrollUp) chatScroll.scrollWheelUp();
+    else if (ev.mouseScrollDown) chatScroll.scrollWheelDown();
     else if (ev.end) chatScroll.jumpToBottom();
     else if (!composerPinned && ev.upArrow) chatScroll.scrollUp();
     else if (!composerPinned && ev.downArrow) chatScroll.scrollDown();
@@ -2071,11 +2081,13 @@ function AppInner({
    * by funneling every toggle through this setter.
    */
   const togglePlanMode = useCallback(
-    (on: boolean) => {
+    (on: boolean, source?: PlanModeToggleSource) => {
       setPlanMode(on);
       tools?.setPlanMode(on);
       if (on) {
         engineeringLifecycleRef.current?.setMode("strict");
+      } else if (source === "slash") {
+        engineeringLifecycleRef.current?.setMode("off");
       } else {
         const state = engineeringLifecycleRef.current?.snapshot().state;
         if (
@@ -2149,8 +2161,8 @@ function AppInner({
             saveEditMode(m);
             return m;
           },
-          setPlanMode: (on: boolean) => {
-            if (codeMode) togglePlanMode(on);
+          setPlanMode: (on: boolean, source?: PlanModeToggleSource) => {
+            if (codeMode) togglePlanMode(on, source);
           },
           applyPresetLive: (name: string) => {
             const settings = resolvePreset(name as PresetName);
@@ -3292,6 +3304,7 @@ function AppInner({
               planStepsRef,
               completedStepIdsRef,
               stepCompletionsRef,
+              pendingStepCompletionsRef,
               planBodyRef,
               planSummaryRef,
               persistPlanState,
@@ -3658,6 +3671,7 @@ function AppInner({
         if (approvedSteps && approvedSteps.length > 0) {
           completedStepIdsRef.current = new Set();
           stepCompletionsRef.current = new Map();
+          pendingStepCompletionsRef.current = new Map();
           log.showPlan({
             title: planSummaryRef.current ?? "plan",
             steps: approvedSteps.map((s) => ({
@@ -3678,6 +3692,7 @@ function AppInner({
         planStepsRef.current = null;
         completedStepIdsRef.current = new Set();
         stepCompletionsRef.current = new Map();
+        pendingStepCompletionsRef.current = new Map();
         planBodyRef.current = null;
         planSummaryRef.current = null;
         persistPlanState();
@@ -3828,6 +3843,7 @@ function AppInner({
           planSummaryRef.current = p.summary ?? null;
           planBodyRef.current = p.plan;
           stepCompletionsRef.current = new Map();
+          pendingStepCompletionsRef.current = new Map();
           engineeringLifecycleRef.current?.recordPlanProposed(p.steps);
           break;
         }
@@ -3837,7 +3853,11 @@ function AppInner({
             title?: string;
             result: string;
             notes?: string;
+            completion?: StepCompletion;
           };
+          if (p.completion?.kind === "step_completed") {
+            pendingStepCompletionsRef.current.set(p.stepId, p.completion);
+          }
           // completed/total come from planStepsRef — don't have them via gate.
           const total = planStepsRef.current?.length ?? 0;
           const completed = completedCountIncludingStep(
@@ -3845,6 +3865,7 @@ function AppInner({
             p.stepId,
             total,
           );
+          engineeringLifecycleRef.current?.recordCheckpointReached();
           // Shared policy (src/core/pause-policy.ts) decides whether to
           // auto-resolve. Per-step rollback snapshot still runs so /restore
           // granularity is preserved.
@@ -3925,6 +3946,9 @@ function AppInner({
         // and let handleCheckpointReviseSubmit resolve with the feedback text.
         setStagedCheckpointRevise(snap);
         return;
+      }
+      if (choice === "stop") {
+        engineeringLifecycleRef.current?.cancel();
       }
       // Auto file-snapshot per plan step
       if (codeMode && choice === "continue") {
@@ -4100,10 +4124,7 @@ function AppInner({
         merged.push(s);
       }
       planStepsRef.current = merged;
-      engineeringLifecycleRef.current?.recordPlanApproved(merged);
-      for (const s of merged) {
-        if (completed.has(s.id)) engineeringLifecycleRef.current?.recordStepCompleted(s.id);
-      }
+      engineeringLifecycleRef.current?.recordPlanRevised(snap.remainingSteps);
       persistPlanState();
       // Replace the live active card so PlanLiveRow shows the new tail —      // existing card's stale ids would fail subsequent step completes.
       agentStore.dispatch({ type: "plan.drop" });

@@ -58,8 +58,23 @@ describe("EngineeringLifecycleRuntime", () => {
     });
 
     expect(out).not.toBeNull();
-    expect(JSON.parse(out!).rejectedReason).toBe("engineering-lifecycle");
+    const parsed = JSON.parse(out!);
+    expect(parsed.rejectedReason).toBe("engineering-lifecycle");
+    expect(parsed.nextAction).toBe("submit_plan");
+    expect(parsed.error.length).toBeLessThan(180);
     expect(lifecycle.snapshot().state).toBe("armed");
+  });
+
+  it("explicitly turning the lifecycle off releases strict rails", () => {
+    const lifecycle = new EngineeringLifecycleRuntime({ mode: "strict" });
+    lifecycle.observeUserPrompt("Refactor the shell and filesystem tool gates");
+
+    expect(lifecycle.guardToolCall("delete_file", { path: "src/old.ts" })).not.toBeNull();
+
+    lifecycle.setMode("off");
+
+    expect(lifecycle.snapshot()).toMatchObject({ mode: "off", state: "idle" });
+    expect(lifecycle.guardToolCall("delete_file", { path: "src/old.ts" })).toBeNull();
   });
 
   it("allows high-risk mutations after plan approval and then requires step evidence", () => {
@@ -88,7 +103,10 @@ describe("EngineeringLifecycleRuntime", () => {
       result: "Refactored the gate path.",
     });
     expect(rejected).not.toBeNull();
-    expect(JSON.parse(rejected!).error).toMatch(/evidence/);
+    const parsed = JSON.parse(rejected!);
+    expect(parsed.error).toMatch(/evidence/);
+    expect(parsed.nextAction).toBe("add_evidence");
+    expect(parsed.error.length).toBeLessThan(180);
 
     expect(
       lifecycle.guardToolCall("mark_step_complete", {
@@ -150,6 +168,105 @@ describe("EngineeringLifecycleRuntime", () => {
         result: "No code was changed.",
       }),
     ).toBeNull();
+  });
+
+  it("keeps completed plan steps when accepting a revision", () => {
+    const lifecycle = new EngineeringLifecycleRuntime({ mode: "strict" });
+    lifecycle.observeUserPrompt("Refactor the command router");
+    lifecycle.recordPlanApproved([
+      { id: "step-1", title: "Extract router", action: "Move routing helpers.", risk: "low" },
+      { id: "step-2", title: "Migrate callers", action: "Update call sites.", risk: "med" },
+      { id: "step-3", title: "Update tests", action: "Refresh tests.", risk: "low" },
+    ]);
+    lifecycle.recordStepCompleted("step-1");
+
+    lifecycle.recordPlanRevised([
+      { id: "step-3", title: "Update tests", action: "Refresh tests first.", risk: "low" },
+      {
+        id: "step-4",
+        title: "Document fallout",
+        action: "Document skipped migration.",
+        risk: "low",
+      },
+    ]);
+
+    expect(lifecycle.snapshot()).toMatchObject({
+      state: "executing",
+      completedStepIds: ["step-1"],
+      planSteps: [
+        { id: "step-1", title: "Extract router" },
+        { id: "step-3", title: "Update tests" },
+        { id: "step-4", title: "Document fallout" },
+      ],
+    });
+  });
+
+  it("does not clear mutation evidence requirements when accepting a revision", () => {
+    const lifecycle = new EngineeringLifecycleRuntime({ mode: "strict" });
+    lifecycle.observeUserPrompt("Refactor formatting across modules");
+    lifecycle.recordPlanApproved([
+      { id: "step-1", title: "Attempt formatter", action: "Change formatter code.", risk: "low" },
+      { id: "step-2", title: "Repair tests", action: "Update focused tests.", risk: "low" },
+    ]);
+    lifecycle.recordToolResult(
+      "write_file",
+      { path: "src/format.ts" },
+      "▸ edit blocks: 1/1 applied\n  ✓ created     src/format.ts",
+    );
+
+    lifecycle.recordPlanRevised([
+      { id: "step-2", title: "Repair tests", action: "Update focused tests.", risk: "low" },
+    ]);
+
+    const rejected = lifecycle.guardToolCall("mark_step_complete", {
+      stepId: "step-2",
+      result: "Updated tests after revision.",
+    });
+    expect(rejected).not.toBeNull();
+    expect(JSON.parse(rejected!).rejectedReason).toBe("engineering-lifecycle-evidence");
+  });
+
+  it("holds high-risk mutations while waiting at a checkpoint", () => {
+    const lifecycle = new EngineeringLifecycleRuntime({ mode: "strict" });
+    lifecycle.observeUserPrompt("Refactor formatting across modules");
+    lifecycle.recordPlanApproved([
+      { id: "step-1", title: "Extract formatter", action: "Move formatter code.", risk: "low" },
+      { id: "step-2", title: "Update tests", action: "Refresh focused tests.", risk: "low" },
+    ]);
+    lifecycle.recordToolResult(
+      "write_file",
+      { path: "src/format.ts" },
+      "▸ edit blocks: 1/1 applied\n  ✓ created     src/format.ts",
+    );
+
+    lifecycle.recordCheckpointReached();
+
+    expect(lifecycle.snapshot().state).toBe("checkpoint");
+    const rejected = lifecycle.guardToolCall("delete_file", { path: "src/old-format.ts" });
+    expect(rejected).not.toBeNull();
+    expect(JSON.parse(rejected!).state).toBe("checkpoint");
+
+    lifecycle.recordStepCompleted("step-1");
+    expect(lifecycle.snapshot().state).toBe("executing");
+  });
+
+  it("can cancel cleanly from a checkpoint", () => {
+    const lifecycle = new EngineeringLifecycleRuntime({ mode: "strict" });
+    lifecycle.observeUserPrompt("Refactor formatting across modules");
+    lifecycle.recordPlanApproved([
+      { id: "step-1", title: "Extract formatter", action: "Move formatter code.", risk: "low" },
+    ]);
+    lifecycle.recordCheckpointReached();
+
+    lifecycle.cancel();
+
+    expect(lifecycle.snapshot()).toMatchObject({
+      state: "cancelled",
+      planSteps: [],
+      completedStepIds: [],
+      mutatedSinceLastStep: false,
+    });
+    expect(lifecycle.guardToolCall("delete_file", { path: "src/old-format.ts" })).not.toBeNull();
   });
 
   it("does not mutate the immutable prefix as lifecycle state changes", () => {

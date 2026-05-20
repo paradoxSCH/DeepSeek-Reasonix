@@ -155,15 +155,15 @@ describe("applyEditBlock", () => {
     expect(existsSync(join(root, "..", "escape.txt"))).toBe(false);
   });
 
-  it("replaces only the first occurrence when SEARCH appears twice", () => {
+  it("refuses ambiguous SEARCH text that appears twice", () => {
     writeFileSync(join(root, "a.txt"), "foo bar foo\n", "utf8");
     const result = applyEditBlock(
       { path: "a.txt", search: "foo", replace: "FOO", offset: 0 },
       root,
     );
-    expect(result.status).toBe("applied");
-    // First "foo" replaced, second left alone.
-    expect(readFileSync(join(root, "a.txt"), "utf8")).toBe("FOO bar foo\n");
+    expect(result.status).toBe("not-found");
+    expect(result.message).toMatch(/multiple times/);
+    expect(readFileSync(join(root, "a.txt"), "utf8")).toBe("foo bar foo\n");
   });
 
   it("matches LF search against CRLF file content", () => {

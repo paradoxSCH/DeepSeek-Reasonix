@@ -328,6 +328,7 @@ export const zhCN: TranslationSchema = {
     },
     stop: { description: "中止当前模型回合（按 Esc 的替代方式）" },
     feedback: { description: "打开 GitHub Issue，诊断信息已复制到剪贴板" },
+    about: { description: "项目信息 — 版本、官网、仓库、协议" },
     plans: { description: "列出此会话的活跃 + 归档计划（最新在前）" },
     replay: {
       description: "加载归档计划为只读的时间旅行快照（默认：最新）",
@@ -607,6 +608,23 @@ export const zhCN: TranslationSchema = {
     planStoppedAt: "▸ 计划在 {label}{counter} 处停止",
     revisingAfter: "▸ 在 {label} 之后修订 — {feedback}",
     historyScrollHint: " ↑ 正在查看历史 · End / PgDn 返回底部 · ↓ 向下滚动一行",
+    editHistoryTitle: "编辑历史（从旧到新）：",
+    editHistoryNoCodeMode: "不在代码模式中",
+    editHistoryNoEdits: "此会话尚未记录任何编辑",
+    editHistoryNoShowId: "用法：/show [id] [path]   （省略 id 查看最新；path 来自文件摘要）",
+    editHistoryIdNotFound: "未找到编辑 #{id} — 运行 /history 查看有效 ID",
+    editHistoryLookupFailed: "意外错误：历史查找失败",
+    editHistoryBatchNoFile: '批次 #{id} 不包含 "{path}" — 此批次中的文件：{files}',
+    editHistoryNoEdits2: "此会话尚未记录编辑 — /history 为空",
+    editHistoryStatusApplied: "已应用",
+    editHistoryStatusPartial: "部分应用",
+    editHistoryStatusUndone: "已撤销",
+    editHistoryHelpShow:
+      "/show <id>            → 文件摘要    ·    /show <id> <path>  → 某个文件的完整 diff",
+    editHistoryHelpUndo:
+      "/undo                 → 最新的未撤销项   ·    /undo <id> [path]  → 指定批次或文件",
+    editHistoryAlreadyReverted: "（已撤销 — /history 显示批次级状态）",
+    editHistoryRevertFile: "/undo {id} {path}  → 仅还原此文件",
   },
   hooks: {
     head: "钩子 {tag} `{cmd}` {decision}{truncTag}",
@@ -735,6 +753,10 @@ export const zhCN: TranslationSchema = {
       loopStarted:
         '▸ 循环已启动 — 每 {duration} 重新提交 "{prompt}"。输入任何内容（或 /loop stop）取消。',
       keysNeedsTui: "/keys 需要 TUI 上下文（postKeys 已连接）。",
+      aboutHeader: "Reasonix v{version} — 缓存优先的 DeepSeek 编码代理",
+      aboutWebsiteLabel: "官网",
+      aboutRepoLabel: "仓库",
+      aboutLicenseLabel: "协议",
       unknownCommand: "未知命令：/{cmd} — 你是不是想用 {list}？",
       unknownCommandShort: "未知命令：/{cmd}  （试试 /help）",
     },
@@ -1616,6 +1638,12 @@ export const zhCN: TranslationSchema = {
     empty: "没有挂载 MCP 服务器。运行 `reasonix setup` 选择一些，或使用 --mcp 启动。",
     serverCount: "{count} 个服务器",
     footer: "↑↓ 选择 · [r] 重连 · [d] 禁用 · Esc 退出",
+  },
+  mcpBrowse: {
+    noResources: "没有任何已连接 MCP 服务器上的资源（或无服务器连接）。`/mcp` 显示当前列表。",
+    readOne: "读取：`/resource <uri>` — 或在选择器中使用 Tab 键。",
+    noPrompts: "没有任何已连接 MCP 服务器上的提示（或无服务器连接）。`/mcp` 显示当前列表。",
+    fetchOne: "获取：`/prompt <name>` — 暂不支持参数；带必需参数的提示将返回服务器错误。",
   },
   mcpLifecycle: {
     handshake: "握手中…",

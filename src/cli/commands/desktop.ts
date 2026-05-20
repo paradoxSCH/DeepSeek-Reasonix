@@ -138,6 +138,7 @@ type InMessage = { tabId?: string } & (
   | { cmd: "compact_history" }
   | { cmd: "retry" }
   | { cmd: "btw"; text: string }
+  | { cmd: "desktop_resync" }
 );
 
 interface NeedsSetupEvent {
@@ -444,9 +445,41 @@ type EmittableEvent =
   | MemoryEvent
   | JobsEvent;
 
+const STDOUT_BACKPRESSURE_WAIT = new Int32Array(new SharedArrayBuffer(4));
+
+type SyncWriter = (fd: number, buffer: Buffer, offset: number, length: number) => number;
+
+/** Drain `buffer` to `fd` across partial writes; retry EAGAIN after a 5 ms park. Exported for tests. */
+export function writeAllSync(
+  fd: number,
+  buffer: Buffer,
+  opts: {
+    write?: SyncWriter;
+    wait?: () => void;
+  } = {},
+): void {
+  const write = opts.write ?? writeSync;
+  const wait = opts.wait ?? (() => Atomics.wait(STDOUT_BACKPRESSURE_WAIT, 0, 0, 5));
+  let offset = 0;
+  while (offset < buffer.length) {
+    let written: number;
+    try {
+      written = write(fd, buffer, offset, buffer.length - offset);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EAGAIN") {
+        wait();
+        continue;
+      }
+      throw err;
+    }
+    if (written <= 0) throw new Error("stdout write returned 0 bytes");
+    offset += written;
+  }
+}
+
 function emit(ev: EmittableEvent, tabId?: string): void {
   const payload = tabId ? { ...ev, tabId } : ev;
-  writeSync(1, Buffer.from(`${JSON.stringify(payload)}\n`, "utf8"));
+  writeAllSync(1, Buffer.from(`${JSON.stringify(payload)}\n`, "utf8"));
 }
 
 function tailLines(s: string, n: number): string {
@@ -1890,6 +1923,28 @@ export async function desktopCommand(opts: DesktopOptions): Promise<void> {
       return;
     }
 
+    if (msg.cmd === "desktop_resync") {
+      // WebView reloads (DevTools F5, host-side respawn) leave the Node child
+      // alive but the React app starts blank. Re-fire the bootstrap events
+      // so it can rehydrate without restarting the agent.
+      const hasKey = !!loadApiKey();
+      for (const t of tabs.values()) {
+        emit(
+          { type: "$tab_opened", workspaceDir: t.rootDir, active: t.id === lastActiveTabId },
+          t.id,
+        );
+        emitSessions(t);
+        emitSettings(t);
+        emitMcpSpecs(t);
+        emitSkills(t);
+        emitMemory(t);
+        emitQQSettings(t);
+        if (!hasKey) emit({ type: "$needs_setup", reason: "no_api_key" }, t.id);
+        else if (t.toolset) emit({ type: "$ready" }, t.id);
+        void emitBalance(t);
+      }
+      return;
+    }
     if (msg.cmd === "jobs_list") {
       emitJobs();
       return;
