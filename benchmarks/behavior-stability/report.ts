@@ -1,8 +1,4 @@
-/** Render behavior-stability results.json → markdown report.
- *
- * Usage:
- *   npx tsx benchmarks/behavior-stability/report.ts <results.json> [--out report.md]
- */
+/** Render behavior-stability results.json → markdown report. */
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";

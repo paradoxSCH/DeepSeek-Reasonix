@@ -1,11 +1,4 @@
-/** CLI runner for behavior-stability evaluation.
- *
- * Usage:
- *   npx tsx benchmarks/behavior-stability/runner.ts [--local] [--api] [--out results.json]
- *
- * Defaults to local-only (fast, free, deterministic).
- * Pass --api to also run the live LLM scenarios (costs ~$0.001).
- */
+/** CLI runner for behavior-stability evaluation. */
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
