@@ -253,6 +253,7 @@ export class CacheFirstLoop {
       sessionName: this.sessionName,
       getAbortSignal: () => this._turnAbort.signal,
       getCurrentTurn: () => this._turn,
+      getSystemPrompt: () => this.prefix.system,
     });
   }
 
