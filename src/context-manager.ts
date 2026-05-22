@@ -19,6 +19,13 @@ import {
 } from "./tokenizer.js";
 import type { ChatMessage } from "./types.js";
 
+function extractPinnedConstraints(systemPrompt: string): string {
+  const highPriority = systemPrompt.match(/# HIGH PRIORITY constraints[\s\S]*?(?=\n# |\n---|$)/);
+  const userMemory = systemPrompt.match(/# User memory[\s\S]*?(?=\n# |\n---|$)/);
+  const projectMemory = systemPrompt.match(/# Project memory[\s\S]*?(?=\n# |\n---|$)/);
+  return [highPriority?.[0], userMemory?.[0], projectMemory?.[0]].filter(Boolean).join("\n\n");
+}
+
 /** Auto-fold when a turn's response shows promptTokens above this fraction of ctxMax. */
 export const HISTORY_FOLD_THRESHOLD = 0.5;
 /** Tail budget after a normal fold, as a fraction of ctxMax. */
@@ -52,6 +59,7 @@ export interface ContextManagerDeps {
   sessionName: string | null;
   getAbortSignal: () => AbortSignal;
   getCurrentTurn: () => number;
+  getSystemPrompt: () => string;
 }
 
 export type PostUsageDecisionKind = "none" | "fold" | "exit-with-summary";
@@ -188,13 +196,17 @@ export class ContextManager {
 
     const memoTail =
       pinnedBodies.length > 0 ? `\n\n${SKILL_PIN_MEMO_HEADER}\n\n${pinnedBodies.join("\n\n")}` : "";
+    const constraints = extractPinnedConstraints(this.deps.getSystemPrompt());
+    const constraintTail = constraints
+      ? `\n\n[PINNED CONSTRAINTS — preserved verbatim]\n\n${constraints}`
+      : "";
     // Route via buildAssistantMessage so the synthetic summary carries
     // reasoning_content under thinking-mode sessions — without it the
     // next API call 400s with "must be passed back" (#1042). Stamp uses
     // the SESSION model so an empty placeholder is added even when the
     // summarizer call somehow returned no reasoning.
     const summaryMsg = buildAssistantMessage(
-      HISTORY_FOLD_MARKER + summary.content + memoTail,
+      HISTORY_FOLD_MARKER + summary.content + memoTail + constraintTail,
       [],
       model,
       summary.reasoningContent,
@@ -289,7 +301,11 @@ export class ContextManager {
   ): Promise<{ content: string; reasoningContent: string }> {
     const summaryModel = "deepseek-v4-flash";
     const systemPrompt =
-      "You compress conversation history for a coding agent. Output one prose recap that preserves: the user's overall goal, decisions and conclusions reached, files inspected or modified, important tool results still relevant to ongoing work, and any open todos. Skip turn-by-turn play-by-play. No tool calls, no markdown headings, no SEARCH/REPLACE blocks — plain prose only.";
+      "You compress conversation history for a coding agent. Output one prose recap that preserves: " +
+      "the user's ORIGINAL OBJECTIVE (never paraphrase away nuance or negative constraints like 'do NOT do X'), " +
+      "all 'do not' / 'never' / 'avoid' instructions, decisions and conclusions reached, " +
+      "files inspected or modified, important tool results still relevant to ongoing work, " +
+      "and any open todos. Skip turn-by-turn play-by-play. No tool calls, no markdown headings, no SEARCH/REPLACE blocks — plain prose only.";
     const healed = healLoadedMessages(messagesToSummarize, DEFAULT_MAX_RESULT_CHARS).messages;
     const messages: ChatMessage[] = [
       { role: "system", content: systemPrompt },
