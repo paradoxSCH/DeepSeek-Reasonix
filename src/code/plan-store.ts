@@ -212,6 +212,10 @@ export function listPlanArchives(sessionName: string): PlanArchiveSummary[] {
   return summaries;
 }
 
+export function isPlanComplete(state: PlanStateOnDisk): boolean {
+  return state.completedStepIds.length >= state.steps.length;
+}
+
 export interface PlanArchiveWithSession extends PlanArchiveSummary {
   sessionName: string;
 }

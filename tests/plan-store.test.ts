@@ -13,6 +13,7 @@ function writeFixture(path: string, content: string): void {
 import {
   archivePlanState,
   clearPlanState,
+  isPlanComplete,
   listPlanArchives,
   loadPlanState,
   planStatePath,
@@ -200,6 +201,61 @@ describe("plan-store roundtrip", () => {
     const path = planStatePath("../etc/passwd");
     expect(path).toMatch(/\.plan\.json$/);
     expect(path).not.toMatch(/\.\.[\\/]etc/);
+  });
+});
+
+describe("isPlanComplete", () => {
+  it("returns true when every step has a matching completed id", () => {
+    expect(
+      isPlanComplete({
+        version: 2,
+        steps: [
+          { id: "a", title: "x", action: "y" },
+          { id: "b", title: "x", action: "y" },
+        ],
+        completedStepIds: ["a", "b"],
+        updatedAt: new Date().toISOString(),
+      }),
+    ).toBe(true);
+  });
+
+  it("returns false when some steps remain incomplete", () => {
+    expect(
+      isPlanComplete({
+        version: 2,
+        steps: [
+          { id: "a", title: "x", action: "y" },
+          { id: "b", title: "x", action: "y" },
+        ],
+        completedStepIds: ["a"],
+        updatedAt: new Date().toISOString(),
+      }),
+    ).toBe(false);
+  });
+
+  it("returns true when completed ids exceed steps (defensive)", () => {
+    // Extra completed ids can happen after plan revision drops steps;
+    // we still treat it as complete.
+    expect(
+      isPlanComplete({
+        version: 2,
+        steps: [{ id: "a", title: "x", action: "y" }],
+        completedStepIds: ["a", "b", "c"],
+        updatedAt: new Date().toISOString(),
+      }),
+    ).toBe(true);
+  });
+
+  it("returns true for empty steps and empty completed ids", () => {
+    // Edge case: a plan with zero steps is vacuously complete.
+    expect(
+      isPlanComplete({
+        version: 2,
+        steps: [],
+        completedStepIds: [],
+        updatedAt: new Date().toISOString(),
+      }),
+    ).toBe(true);
   });
 });
 

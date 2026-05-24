@@ -21,7 +21,9 @@ import { type EditBlock, applyEditBlocks, snapshotBeforeEdits } from "../../code
 import { EngineeringLifecycleRuntime } from "../../code/lifecycle.js";
 import { clearPendingEdits, loadPendingEdits, savePendingEdits } from "../../code/pending-edits.js";
 import {
+  archivePlanState,
   clearPlanState,
+  isPlanComplete,
   loadPlanState,
   relativeTime,
   savePlanState,
@@ -1576,28 +1578,35 @@ function AppInner({
     if (session && loop.resumedMessageCount > 0) {
       const restoredPlan = loadPlanState(session);
       if (restoredPlan && restoredPlan.steps.length > 0) {
-        planStepsRef.current = restoredPlan.steps;
-        completedStepIdsRef.current = new Set(restoredPlan.completedStepIds);
-        stepCompletionsRef.current = new Map(Object.entries(restoredPlan.stepCompletions ?? {}));
-        pendingStepCompletionsRef.current = new Map();
-        planBodyRef.current = restoredPlan.body ?? null;
-        planSummaryRef.current = restoredPlan.summary ?? null;
-        engineeringLifecycleRef.current?.recordPlanApproved(restoredPlan.steps);
-        for (const stepId of restoredPlan.completedStepIds) {
-          engineeringLifecycleRef.current?.recordStepCompleted(stepId);
+        // If every step is already done, the plan was fully completed in a
+        // prior session but never archived (issue #1355). Archive it now and
+        // skip restoration so the user doesn't see a stale completed plan.
+        if (isPlanComplete(restoredPlan)) {
+          archivePlanState(session);
+        } else {
+          planStepsRef.current = restoredPlan.steps;
+          completedStepIdsRef.current = new Set(restoredPlan.completedStepIds);
+          stepCompletionsRef.current = new Map(Object.entries(restoredPlan.stepCompletions ?? {}));
+          pendingStepCompletionsRef.current = new Map();
+          planBodyRef.current = restoredPlan.body ?? null;
+          planSummaryRef.current = restoredPlan.summary ?? null;
+          engineeringLifecycleRef.current?.recordPlanApproved(restoredPlan.steps);
+          for (const stepId of restoredPlan.completedStepIds) {
+            engineeringLifecycleRef.current?.recordStepCompleted(stepId);
+          }
+          const when = relativeTime(restoredPlan.updatedAt);
+          const done = new Set(restoredPlan.completedStepIds);
+          const summary = restoredPlan.summary ? ` - ${restoredPlan.summary}` : "";
+          log.showPlan({
+            title: t("ui.resumedPlan", { when, summary }),
+            steps: restoredPlan.steps.map((s) => ({
+              id: s.id,
+              title: s.title,
+              status: done.has(s.id) ? "done" : "queued",
+            })),
+            variant: "resumed",
+          });
         }
-        const when = relativeTime(restoredPlan.updatedAt);
-        const done = new Set(restoredPlan.completedStepIds);
-        const summary = restoredPlan.summary ? ` - ${restoredPlan.summary}` : "";
-        log.showPlan({
-          title: t("ui.resumedPlan", { when, summary }),
-          steps: restoredPlan.steps.map((s) => ({
-            id: s.id,
-            title: s.title,
-            status: done.has(s.id) ? "done" : "queued",
-          })),
-          variant: "resumed",
-        });
       }
     }
     // One-time onboarding tip for the edit-gate keybindings. New users
@@ -2933,7 +2942,15 @@ function AppInner({
               engineeringLifecycleRef.current?.recordStepCompleted(s.id);
               added++;
             }
-            if (added > 0) persistPlanState();
+            if (added > 0) {
+              const total = steps.length;
+              const completed = completedStepIdsRef.current.size;
+              if (session && completed >= total) {
+                archivePlanState(session);
+              } else {
+                persistPlanState();
+              }
+            }
             return added;
           },
           reloadHooks: () => reloadHooks(codeMode ? currentRootDir : undefined),
