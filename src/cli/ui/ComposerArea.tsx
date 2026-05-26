@@ -8,6 +8,7 @@ import React from "react";
 
 import type { EditMode } from "../../config.js";
 import type { JobRegistry } from "../../tools/jobs.js";
+import { useRenderTrace } from "./render-trace.js";
 
 import { AtMentionSuggestions } from "./AtMentionSuggestions.js";
 import { PromptInput } from "./PromptInput.js";
@@ -19,6 +20,7 @@ import { SlashSuggestions } from "./SlashSuggestions.js";
 
 import { StatusRow } from "./layout/StatusRow.js";
 import { formatLoopStatus } from "./loop.js";
+import { useSlowTick } from "./ticker.js";
 
 import type { StatusBarConfig } from "./layout/StatusRow.js";
 
@@ -106,6 +108,7 @@ export const ComposerArea: React.FC<ComposerAreaProps> = React.memo(
     slashArgMatches,
     slashArgSelected,
   }) => {
+    useRenderTrace("ComposerArea");
     const inputArea = (
       <Box flexDirection="column" flexShrink={0} flexWrap="nowrap">
         <Box flexDirection="column" flexShrink={0} flexWrap="nowrap">
@@ -142,10 +145,11 @@ export const ComposerArea: React.FC<ComposerAreaProps> = React.memo(
           onHistoryNext={onHistoryNext}
           onOpenExternalEditor={onOpenExternalEditor}
           onCursorChange={onCursorChange}
-          rowsAfter={1 + (activeLoop ? 1 : 0) + (jobs ? 1 : 0)}
+          rowsAfter={2 + (activeLoop ? 1 : 0)}
           mode={mode}
           model={model}
           isHistoryMode={isHistoryMode}
+          planMode={planMode}
         />
         {activeLoop ? <LoopStatusRow loop={activeLoop} /> : null}
         <StatusRow statusBar={statusBar} />
@@ -164,11 +168,7 @@ function LoopStatusRow({
 }: {
   loop: { prompt: string; intervalMs: number; nextFireAt: number; iter: number };
 }) {
-  const [, setTick] = React.useState(0);
-  React.useEffect(() => {
-    const id = setInterval(() => setTick((t) => t + 1), 1000);
-    return () => clearInterval(id);
-  }, []);
+  useSlowTick();
   const nextFireMs = Math.max(0, loop.nextFireAt - Date.now());
   return (
     <Box>

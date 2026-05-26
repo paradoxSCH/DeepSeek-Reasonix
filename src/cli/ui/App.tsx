@@ -21,7 +21,9 @@ import { type EditBlock, applyEditBlocks, snapshotBeforeEdits } from "../../code
 import { EngineeringLifecycleRuntime } from "../../code/lifecycle.js";
 import { clearPendingEdits, loadPendingEdits, savePendingEdits } from "../../code/pending-edits.js";
 import {
+  archivePlanState,
   clearPlanState,
+  isPlanComplete,
   loadPlanState,
   relativeTime,
   savePlanState,
@@ -29,12 +31,15 @@ import {
 import {
   type EditMode,
   type EngineeringLifecycleMode,
+  type HistoryScrollMode,
   type ReasoningEffort,
   defaultConfigPath,
   editModeHintShown,
   isReasoningEffort,
   loadEndpoint,
   loadEngineeringLifecycleMode,
+  loadHistoryScrollMode,
+  loadMouseWheelRows,
   loadReasoningEffort,
   loadTheme,
   markEditModeHintShown,
@@ -90,6 +95,7 @@ import {
   type SessionSummary,
 } from "../../telemetry/stats.js";
 import { defaultUsageLogPath } from "../../telemetry/usage.js";
+import { warmupTokenizer } from "../../tokenizer.js";
 import type { ToolRegistry } from "../../tools.js";
 import type { ChoiceOption } from "../../tools/choice.js";
 import type { PlanStep, StepCompletion } from "../../tools/plan.js";
@@ -120,6 +126,7 @@ import { PlanReviseEditor } from "./PlanReviseEditor.js";
 import { PromptInput } from "./PromptInput.js";
 import { SessionPicker } from "./SessionPicker.js";
 import { ShellConfirm, type ShellConfirmChoice } from "./ShellConfirm.js";
+import { useRenderTrace } from "./render-trace.js";
 
 import { SlashArgPicker } from "./SlashArgPicker.js";
 import { SlashSuggestions } from "./SlashSuggestions.js";
@@ -137,7 +144,9 @@ import {
   shouldApplyEditToolImmediately,
 } from "./edit-tool-gate.js";
 import { loopEventToDashboard } from "./effects/loop-to-dashboard.js";
+import { effortChoicesForBaseUrl } from "./effort-choices.js";
 import { appendGlobalMemory, appendProjectMemory, detectHashMemory } from "./hash-memory.js";
+import { type ResolvedHistoryScrollMode, resolveHistoryScrollMode } from "./history-scroll-mode.js";
 import { applySlashResult } from "./hooks/apply-slash-result.js";
 import { handleAssistantFinal } from "./hooks/handle-assistant-final.js";
 import {
@@ -160,6 +169,7 @@ import { useToolProgressDisplay } from "./hooks/useToolProgressDisplay.js";
 import { useTranscriptWriter } from "./hooks/useTranscriptWriter.js";
 import { useWorkspaceRoot } from "./hooks/useWorkspaceRoot.js";
 import { useKeystroke } from "./keystroke-context.js";
+import { CardStream } from "./layout/CardStream.js";
 import { LiveExpandContext } from "./layout/LiveExpandContext.js";
 import { ModeStatusBar } from "./layout/LiveRows.js";
 import { StaticCardStream } from "./layout/StaticCardStream.js";
@@ -183,16 +193,17 @@ import {
 } from "./slash.js";
 import { TurnTranslator } from "./state/TurnTranslator.js";
 import { cardsToDashboardMessages } from "./state/cards-to-messages.js";
+import { ChatScrollProvider, useChatScrollActions } from "./state/chat-scroll-provider.js";
 import { hydrateCardsFromMessages } from "./state/hydrate.js";
 import { InflightProvider } from "./state/inflight-context.js";
 import { AgentStoreProvider, useAgentState, useAgentStore } from "./state/provider.js";
 import { VerboseContext } from "./state/verbose-context.js";
-import { isLegacyWindowsConsole } from "./terminal-host.js";
 import { ThemeProvider } from "./theme/context.js";
 import { listThemeNames } from "./theme/tokens.js";
 import { FG, type ThemeName } from "./theme/tokens.js";
-import { TickerProvider } from "./ticker.js";
+import { TickerProvider, useSlowTick } from "./ticker.js";
 import { handleTurnInterrupt } from "./turn-interrupt.js";
+import { codeUndoContextMessage, codeUndoInfo } from "./undo-context.js";
 import { useCompletionPickers } from "./useCompletionPickers.js";
 import { useEditHistory } from "./useEditHistory.js";
 import { useSessionInfo } from "./useSessionInfo.js";
@@ -300,6 +311,8 @@ export interface AppProps {
   qqSubmitRef?: { current: ((text: string) => void) | null };
   /** Ref filled by App on mount so QQ errors appear in the TUI log. */
   qqErrorRef?: { current: ((msg: string) => void) | null };
+  /** Resolved chat-history scroll mode, computed by the launcher from config/env. */
+  historyScrollMode?: ResolvedHistoryScrollMode;
 }
 
 // Module-level so the embedded dashboard server survives App remounts (chat.tsx
@@ -321,23 +334,6 @@ let persistentDashboardHandle: DashboardServerHandle | null = null;
 const persistentEventSubscribers = new Set<(ev: DashboardEvent) => void>();
 
 /**
- * Throttle interval in ms. 50ms —20Hz —slow enough that cursor-up
- * repaints on winpty/MINTTY/ConEmu/tmux don't leave half-drawn frames,
- * fast enough that streaming text still reads as continuous. Legacy
- * Windows conhost paints each frame visibly, so 20Hz on a maximized
- * `powershell.exe` is a flicker storm (#1300) — drop to ~7Hz there.
- * Override via `REASONIX_FLUSH_MS` if you want 60Hz on a terminal you trust.
- */
-const FLUSH_INTERVAL_MS = (() => {
-  const raw = process.env.REASONIX_FLUSH_MS;
-  const fallback = isLegacyWindowsConsole() ? 150 : 50;
-  if (!raw) return fallback;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed < 16 || parsed > 1000) return fallback;
-  return Math.round(parsed);
-})();
-
-/**
  * Single-line status pill rendered below the modeline whenever a /loop
  * is active. Re-renders every second so the countdown ticks.
  */
@@ -346,11 +342,7 @@ function LoopStatusRow({
 }: {
   loop: { prompt: string; intervalMs: number; nextFireAt: number; iter: number };
 }) {
-  const [, setTick] = React.useState(0);
-  React.useEffect(() => {
-    const id = setInterval(() => setTick((t) => t + 1), 1000);
-    return () => clearInterval(id);
-  }, []);
+  useSlowTick();
   const nextFireMs = Math.max(0, loop.nextFireAt - Date.now());
   return (
     <Box>
@@ -414,15 +406,25 @@ export function App(props: AppProps): React.ReactElement {
       showFeedbackHint: cfg.showFeedbackHint !== false,
     };
   }, []);
+  const historyScrollMode = React.useMemo(
+    () =>
+      props.historyScrollMode ??
+      resolveHistoryScrollMode({ configured: loadHistoryScrollMode() as HistoryScrollMode }),
+    [props.historyScrollMode],
+  );
+  const wheelRows = React.useMemo(() => loadMouseWheelRows(), []);
   return (
     <ThemeProvider name={themeName}>
       <AgentStoreProvider session={session} initialCards={initialCards}>
-        <AppInner
-          {...props}
-          themeName={themeName}
-          setThemeName={setThemeName}
-          statusBar={statusBar}
-        />
+        <ChatScrollProvider wheelRows={wheelRows}>
+          <AppInner
+            {...props}
+            historyScrollMode={historyScrollMode}
+            themeName={themeName}
+            setThemeName={setThemeName}
+            statusBar={statusBar}
+          />
+        </ChatScrollProvider>
       </AgentStoreProvider>
     </ThemeProvider>
   );
@@ -432,6 +434,7 @@ type AppInnerProps = AppProps & {
   themeName: ThemeName;
   setThemeName: React.Dispatch<React.SetStateAction<ThemeName>>;
   statusBar: StatusBarConfig;
+  historyScrollMode: ResolvedHistoryScrollMode;
 };
 
 function AppInner({
@@ -458,10 +461,12 @@ function AppInner({
   qqChannel,
   qqSubmitRef,
   qqErrorRef,
+  historyScrollMode,
   themeName,
   setThemeName,
   statusBar,
 }: AppInnerProps) {
+  useRenderTrace("AppInner");
   markPhase("app_inner_start");
   const log = useScrollback();
   const agentStore = useAgentStore();
@@ -495,6 +500,17 @@ function AppInner({
   useEffect(() => {
     if (!isStreaming && liveExpand) setLiveExpand(false);
   }, [isStreaming, liveExpand]);
+  // Seed costDisplayCurrency into state so reactive components respond to the toggle.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only seed
+  useEffect(() => {
+    const cfg = readConfig();
+    if (cfg.costCurrency) {
+      agentStore.dispatch({
+        type: "session.update",
+        patch: { costDisplayCurrency: cfg.costCurrency },
+      });
+    }
+  }, []);
   // ctrl-r toggles verbose mode — ReasoningCard / ToolCard skip elision while on.
   // Survives turn boundaries; resets on session restart.
   const [verboseMode, setVerboseMode] = useState(false);
@@ -511,6 +527,8 @@ function AppInner({
   useEffect(() => {
     markPhase("first_paint");
     dumpStartupProfile();
+    // Tokenizer cold-load is ~100ms + 35MB; amortize while the user reads the banner.
+    setTimeout(warmupTokenizer, 0);
   }, []);
 
   // Live MCP server list: initialized from the boot-time prop, then
@@ -798,6 +816,7 @@ function AppInner({
     history: promptHistory,
     isHistoryMode,
   } = useInputRecall(setInput);
+  const chatScroll = useChatScrollActions();
   const { setRawMode, isRawModeSupported } = useStdin();
   // Ctrl+X —hand the composer buffer to $EDITOR. Raw-mode flip lets the
   // editor own line-buffered input; result replaces the composer value.
@@ -1450,6 +1469,10 @@ function AppInner({
     };
   }, [pendingCheckpoint, broadcastDashboardEvent]);
 
+  // `max` is a DeepSeek-only reasoning extension — drop it from /effort
+  // suggestions + picker when the active endpoint is third-party (#1794).
+  const effortChoices = React.useMemo(() => effortChoicesForBaseUrl(loop.client.baseUrl), [loop]);
+
   // Three mutually-exclusive input-prefix pickers (slash name, @ file
   // mention, slash argument) —state + memos + commit callbacks live
   // in a dedicated hook so App.tsx only sees the small surface it
@@ -1480,6 +1503,7 @@ function AppInner({
     models,
     mcpServers: liveMcpServers,
     slashUsage,
+    effortChoices,
   });
 
   useEffect(() => {
@@ -1576,28 +1600,35 @@ function AppInner({
     if (session && loop.resumedMessageCount > 0) {
       const restoredPlan = loadPlanState(session);
       if (restoredPlan && restoredPlan.steps.length > 0) {
-        planStepsRef.current = restoredPlan.steps;
-        completedStepIdsRef.current = new Set(restoredPlan.completedStepIds);
-        stepCompletionsRef.current = new Map(Object.entries(restoredPlan.stepCompletions ?? {}));
-        pendingStepCompletionsRef.current = new Map();
-        planBodyRef.current = restoredPlan.body ?? null;
-        planSummaryRef.current = restoredPlan.summary ?? null;
-        engineeringLifecycleRef.current?.recordPlanApproved(restoredPlan.steps);
-        for (const stepId of restoredPlan.completedStepIds) {
-          engineeringLifecycleRef.current?.recordStepCompleted(stepId);
+        // If every step is already done, the plan was fully completed in a
+        // prior session but never archived (issue #1355). Archive it now and
+        // skip restoration so the user doesn't see a stale completed plan.
+        if (isPlanComplete(restoredPlan)) {
+          archivePlanState(session);
+        } else {
+          planStepsRef.current = restoredPlan.steps;
+          completedStepIdsRef.current = new Set(restoredPlan.completedStepIds);
+          stepCompletionsRef.current = new Map(Object.entries(restoredPlan.stepCompletions ?? {}));
+          pendingStepCompletionsRef.current = new Map();
+          planBodyRef.current = restoredPlan.body ?? null;
+          planSummaryRef.current = restoredPlan.summary ?? null;
+          engineeringLifecycleRef.current?.recordPlanApproved(restoredPlan.steps);
+          for (const stepId of restoredPlan.completedStepIds) {
+            engineeringLifecycleRef.current?.recordStepCompleted(stepId);
+          }
+          const when = relativeTime(restoredPlan.updatedAt);
+          const done = new Set(restoredPlan.completedStepIds);
+          const summary = restoredPlan.summary ? ` - ${restoredPlan.summary}` : "";
+          log.showPlan({
+            title: t("ui.resumedPlan", { when, summary }),
+            steps: restoredPlan.steps.map((s) => ({
+              id: s.id,
+              title: s.title,
+              status: done.has(s.id) ? "done" : "queued",
+            })),
+            variant: "resumed",
+          });
         }
-        const when = relativeTime(restoredPlan.updatedAt);
-        const done = new Set(restoredPlan.completedStepIds);
-        const summary = restoredPlan.summary ? ` - ${restoredPlan.summary}` : "";
-        log.showPlan({
-          title: t("ui.resumedPlan", { when, summary }),
-          steps: restoredPlan.steps.map((s) => ({
-            id: s.id,
-            title: s.title,
-            status: done.has(s.id) ? "done" : "queued",
-          })),
-          variant: "resumed",
-        });
       }
     }
     // One-time onboarding tip for the edit-gate keybindings. New users
@@ -1643,6 +1674,29 @@ function AppInner({
       return next;
     });
   });
+
+  useKeystroke((ev) => {
+    if (ev.paste || modalOpen) return;
+    if (ev.mouseScrollUp) {
+      chatScroll.scrollWheelUp();
+      return;
+    }
+    if (ev.mouseScrollDown) {
+      chatScroll.scrollWheelDown();
+      return;
+    }
+    if (ev.pageUp && (busy || input.length === 0)) {
+      chatScroll.scrollPageUp();
+      return;
+    }
+    if (ev.pageDown && (busy || input.length === 0)) {
+      chatScroll.scrollPageDown();
+      return;
+    }
+    if (ev.end && (busy || input.length === 0)) {
+      chatScroll.jumpToBottom();
+    }
+  }, historyScrollMode === "app");
 
   // Double-Esc — opens the rewind/edit picker when idle with an empty
   // composer. Tracks the prior Esc timestamp; a second Esc inside 500 ms
@@ -1822,7 +1876,9 @@ function AppInner({
       undoBanner
     ) {
       const out = codeUndo([]);
-      log.pushInfo(out);
+      const contextMessage = codeUndoContextMessage(out);
+      if (contextMessage) loop.appendAndPersist({ role: "system", content: contextMessage });
+      log.pushInfo(codeUndoInfo(out));
       return;
     }
     // Space toggles pause on the active undo countdown. Same gating as
@@ -2933,7 +2989,15 @@ function AppInner({
               engineeringLifecycleRef.current?.recordStepCompleted(s.id);
               added++;
             }
-            if (added > 0) persistPlanState();
+            if (added > 0) {
+              const total = steps.length;
+              const completed = completedStepIdsRef.current.size;
+              if (session && completed >= total) {
+                archivePlanState(session);
+              } else {
+                persistPlanState();
+              }
+            }
             return added;
           },
           reloadHooks: () => reloadHooks(codeMode ? currentRootDir : undefined),
@@ -3141,7 +3205,6 @@ function AppInner({
         reasoningBuf.current = "";
         toolCallBuildBuf.current = null;
       };
-      const timer = setInterval(flush, FLUSH_INTERVAL_MS);
 
       // Expand `@path/to/file.ts` mentions in code mode: the model
       // gets the inlined content appended under a "Referenced files"
@@ -3243,6 +3306,7 @@ function AppInner({
           } else if (ev.role === "assistant_delta") {
             if (ev.content) contentBuf.current += ev.content;
             if (ev.reasoningDelta) reasoningBuf.current += ev.reasoningDelta;
+            flush();
           } else if (ev.role === "tool_call_delta") {
             if (ev.toolName) {
               toolCallBuildBuf.current = {
@@ -3251,6 +3315,7 @@ function AppInner({
                 index: ev.toolCallIndex,
                 readyCount: ev.toolCallReadyCount,
               };
+              flush();
             }
           } else if (ev.role === "assistant_final") {
             lastAssistantText = ev.content || streamRef.text;
@@ -3380,7 +3445,7 @@ function AppInner({
         }
         qq.maybeSendFinalReply(lastAssistantText);
       } finally {
-        clearInterval(timer);
+        flush();
         // Esc aborted the turn —close any in-flight cards (streaming /
         // reasoning / tool / branch) so they leave the live region. Without
         // this, stranded done=false cards stick in CardStream's live tail.
@@ -3388,6 +3453,7 @@ function AppInner({
           translator.abort();
         }
         clearToolProgressDisplay();
+        agentStore.dispatch({ type: "plan.idle" });
         setSummary(loop.stats.summary());
         busyRef.current = false;
         setBusy(false);
@@ -4206,7 +4272,11 @@ function AppInner({
               <Box flexDirection="column" flexGrow={1}>
                 <LiveExpandContext.Provider value={liveExpand}>
                   <VerboseContext.Provider value={verboseMode}>
-                    <StaticCardStream suppressLive={modalOpen} />
+                    {historyScrollMode === "app" ? (
+                      <CardStream suppressLive={modalOpen} />
+                    ) : (
+                      <StaticCardStream suppressLive={modalOpen} />
+                    )}
                   </VerboseContext.Provider>
                 </LiveExpandContext.Provider>
                 {/*
@@ -4443,6 +4513,7 @@ function AppInner({
                   models={models}
                   current={loop.model}
                   currentEffort={loop.reasoningEffort}
+                  effortChoices={effortChoices}
                   onRefresh={refreshModels}
                   onChoose={(outcome) => {
                     setPendingModelPicker(false);

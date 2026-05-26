@@ -96,7 +96,7 @@ export function StatusRow({
                 {"▸ "}
               </Text>
               <Text bold color={FG.body}>
-                {`${formatCost(status.cost, status.balanceCurrency)} ${t("statusBar.turn")}`}
+                {`${formatCost(status.cost, status.costDisplayCurrency ?? status.balanceCurrency)} ${t("statusBar.turn")}`}
               </Text>
             </Pill>
           </>

@@ -27,13 +27,18 @@ import {
   loadEditMode,
   loadEditor,
   loadEndpoint,
+  loadExaApiKey,
+  loadMetasoApiKey,
   loadModel,
+  loadOllamaApiKey,
+  loadPerplexityApiKey,
   loadQQConfig,
   loadReasoningEffort,
   loadRecentWorkspaces,
   loadResolvedSkillPaths,
   loadShowSystemEvents,
   loadSubagentModels,
+  loadTavilyApiKey,
   loadWorkspaceDir,
   pushRecentWorkspace,
   readConfig,
@@ -63,6 +68,12 @@ import {
 import { autoResolveVerdict } from "../../core/pause-policy.js";
 import { augmentProcessPath } from "../../desktop/login-shell-path.js";
 import {
+  type MemoryEntryDetail,
+  type MemoryEntryInfo,
+  collectMemoryEntriesForWorkspace,
+  readMemoryEntryDetail,
+} from "../../desktop/memory-browser.js";
+import {
   loadDesktopQQState,
   saveDesktopQQSettings,
   setDesktopQQEnabled,
@@ -85,11 +96,17 @@ import {
   loadSessionMessages,
   loadSessionMeta,
   patchSessionMeta,
+  patchSessionWorkspaceIfMissing,
   sessionPath,
   timestampSuffix,
 } from "../../memory/session.js";
-import { MemoryStore } from "../../memory/user.js";
 import { QQChannel } from "../../qq/channel.js";
+import {
+  type ExternalSessionSource,
+  discoverExternalSessionApps,
+  importExternalSession,
+  importExternalSessions,
+} from "../../session-import.js";
 import { SkillStore } from "../../skills.js";
 import { countTokensBounded } from "../../tokenizer.js";
 import type { ChoiceOption } from "../../tools/choice.js";
@@ -116,6 +133,10 @@ type InMessage = { tabId?: string } & (
   | { cmd: "session_delete"; name: string }
   | { cmd: "session_load"; name: string }
   | { cmd: "session_rename"; name: string; title: string }
+  | { cmd: "session_import"; source: ExternalSessionSource; path: string; name?: string }
+  | { cmd: "session_import_scan" }
+  | { cmd: "session_import_bulk"; sources: ExternalSessionSource[] }
+  | { cmd: "memory_read"; path: string }
   | { cmd: "new_chat" }
   | { cmd: "setup_save_key"; key: string }
   | { cmd: "settings_get" }
@@ -128,7 +149,13 @@ type InMessage = { tabId?: string } & (
       workspaceDir?: string;
       model?: string;
       editor?: string;
-      webSearchEngine?: "bing" | "searxng" | "metaso" | "tavily" | "perplexity" | "exa";
+      webSearchEngine?: "bing" | "searxng" | "metaso" | "tavily" | "perplexity" | "exa" | "ollama";
+      webSearchEndpoint?: string | null;
+      metasoApiKey?: string | null;
+      tavilyApiKey?: string | null;
+      perplexityApiKey?: string | null;
+      exaApiKey?: string | null;
+      ollamaApiKey?: string | null;
       subagentModels?: Record<string, "flash" | "pro">;
       showSystemEvents?: boolean;
     }
@@ -177,7 +204,15 @@ interface SettingsEvent {
   recentWorkspaces: string[];
   model: string;
   editor?: string;
-  webSearchEngine?: "bing" | "searxng" | "metaso" | "tavily" | "perplexity" | "exa";
+  webSearchEngine?: "bing" | "searxng" | "metaso" | "tavily" | "perplexity" | "exa" | "ollama";
+  webSearchEndpoint?: string;
+  webSearchApiKeys?: {
+    metaso?: string;
+    tavily?: string;
+    perplexity?: string;
+    exa?: string;
+    ollama?: string;
+  };
   subagentModels?: Record<string, "flash" | "pro">;
   showSystemEvents?: boolean;
   version: string;
@@ -213,7 +248,25 @@ interface PlanRequiredEvent {
 
 interface SessionsEvent {
   type: "$sessions";
-  items: { name: string; messageCount: number; mtime: string }[];
+  items: {
+    name: string;
+    messageCount: number;
+    mtime: string;
+    summary?: string;
+    workspaceStatus?: "matched" | "legacy_missing_meta";
+  }[];
+}
+
+interface SessionImportSourcesEvent {
+  type: "$session_import_sources";
+  apps: ReturnType<typeof discoverExternalSessionApps>;
+}
+
+interface SessionImportResultEvent {
+  type: "$session_import_result";
+  imported: number;
+  skipped: number;
+  failed: number;
 }
 
 interface MentionResultsEvent {
@@ -372,15 +425,14 @@ interface CtxBreakdownEvent {
   logTokens?: number;
 }
 
-interface MemoryEntryInfo {
-  name: string;
-  scope: "project" | "global";
-  description: string;
-}
-
 interface MemoryEvent {
   type: "$memory";
   entries: MemoryEntryInfo[];
+}
+
+interface MemoryDetailEvent {
+  type: "$memory_detail";
+  detail: MemoryEntryDetail;
 }
 
 interface SkillInfo {
@@ -450,6 +502,8 @@ type EmittableEvent =
   | StepCompletedEvent
   | PlanClearedEvent
   | SessionsEvent
+  | SessionImportSourcesEvent
+  | SessionImportResultEvent
   | SessionLoadedEvent
   | SessionEmptyEvent
   | NeedsSetupEvent
@@ -466,6 +520,7 @@ type EmittableEvent =
   | SkillsEvent
   | CtxBreakdownEvent
   | MemoryEvent
+  | MemoryDetailEvent
   | JobsEvent;
 
 const STDOUT_BACKPRESSURE_WAIT = new Int32Array(new SharedArrayBuffer(4));
@@ -518,7 +573,43 @@ function tailLines(s: string, n: number): string {
   return lines.slice(-n).join("\n");
 }
 
-function buildLoadedMessages(records: ChatMessage[]): LoadedMessage[] {
+const LOADED_RECENT_MESSAGE_WINDOW = 200;
+const LOADED_MIN_ELIDE_CHARS = 4096;
+const LOADED_ELIDED_PREFIX = "[elided — older than the last ";
+
+function elideLoadedField(value: string): string {
+  if (value.length <= LOADED_MIN_ELIDE_CHARS) return value;
+  if (value.startsWith(LOADED_ELIDED_PREFIX)) return value;
+  return `${LOADED_ELIDED_PREFIX}${LOADED_RECENT_MESSAGE_WINDOW} messages; ${value.length.toLocaleString()} chars dropped to save memory. Full content is on disk in the session log.]`;
+}
+
+function elideLoadedMessages(messages: LoadedMessage[]): LoadedMessage[] {
+  if (messages.length < LOADED_RECENT_MESSAGE_WINDOW) return messages;
+  const cutoff = messages.length - LOADED_RECENT_MESSAGE_WINDOW;
+  return messages.map((msg, i) => {
+    if (i >= cutoff || msg.kind !== "assistant") return msg;
+    return {
+      ...msg,
+      segments: msg.segments.map((segment) => {
+        switch (segment.kind) {
+          case "reasoning":
+          case "text":
+            return { ...segment, text: elideLoadedField(segment.text) };
+          case "tool":
+            return {
+              ...segment,
+              args: elideLoadedField(segment.args),
+              ...(segment.result !== undefined ? { result: elideLoadedField(segment.result) } : {}),
+            };
+          default:
+            return segment;
+        }
+      }),
+    };
+  });
+}
+
+export function buildLoadedMessages(records: ChatMessage[]): LoadedMessage[] {
   const out: LoadedMessage[] = [];
   let turn = 0;
   let pendingAssistantIdx = -1;
@@ -563,7 +654,29 @@ function buildLoadedMessages(records: ChatMessage[]): LoadedMessage[] {
       }
     }
   }
-  return out;
+  return elideLoadedMessages(out);
+}
+
+function maskApiKey(key: string | undefined): string | undefined {
+  if (!key) return undefined;
+  if (key.length <= 7) return `${key.slice(0, 2)}…`;
+  return `${key.slice(0, 6)}…${key.slice(-3)}`;
+}
+
+function collectWebSearchApiKeyPrefixes(): {
+  metaso?: string;
+  tavily?: string;
+  perplexity?: string;
+  exa?: string;
+  ollama?: string;
+} {
+  return {
+    metaso: maskApiKey(loadMetasoApiKey()),
+    tavily: maskApiKey(loadTavilyApiKey()),
+    perplexity: maskApiKey(loadPerplexityApiKey()),
+    exa: maskApiKey(loadExaApiKey()),
+    ollama: maskApiKey(loadOllamaApiKey()),
+  };
 }
 
 function emitSettings(tab: Tab): void {
@@ -584,6 +697,8 @@ function emitSettings(tab: Tab): void {
       model: tab.currentModel,
       editor: loadEditor(),
       webSearchEngine: readWebSearchEngine(),
+      webSearchEndpoint: readConfig().webSearchEndpoint,
+      webSearchApiKeys: collectWebSearchApiKeyPrefixes(),
       subagentModels: loadSubagentModels(),
       showSystemEvents: loadShowSystemEvents(),
       version: VERSION,
@@ -629,11 +744,62 @@ function emitSessions(tab: Tab): void {
       messageCount: s.messageCount,
       mtime: s.mtime.toISOString(),
       summary: s.meta.summary,
+      workspaceStatus: s.workspaceStatus,
     }));
     emit({ type: "$sessions", items }, tab.id);
   } catch (err) {
     emit({ type: "$error", message: `session_list failed: ${(err as Error).message}` }, tab.id);
   }
+}
+
+function loadSessionIntoTab(
+  tab: Tab,
+  name: string,
+  actions: {
+    abortTurn: (tab: Tab) => void;
+    cancelPendingGates: (tab: Tab) => void;
+    persistOpenTabs: () => void;
+  },
+): void {
+  const records = loadSessionMessages(name);
+  const backfilledWorkspace = patchSessionWorkspaceIfMissing(name, tab.rootDir);
+  const meta = loadSessionMeta(name);
+  // Only set switching flag when there's a live turn to abort —
+  // otherwise the flag stays true and suppresses the first turn's events (#1217).
+  if (tab.aborter) tab.switching = true;
+  actions.abortTurn(tab);
+  actions.cancelPendingGates(tab);
+  tab.currentSession = name;
+  actions.persistOpenTabs();
+  if (tab.runtime) tab.runtime = buildRuntimeFor(tab);
+  const loadedMessages = buildLoadedMessages(records);
+  if (loadedMessages.length === 0) {
+    let sizeBytes = 0;
+    try {
+      sizeBytes = statSync(sessionPath(name)).size;
+    } catch {
+      /* file may not exist */
+    }
+    process.stderr.write(
+      `session_load: "${name}" returned 0 messages (file size=${sizeBytes}B) — empty or unreadable jsonl\n`,
+    );
+    emit({ type: "$session_empty", name, sizeBytes }, tab.id);
+  }
+  emit(
+    {
+      type: "$session_loaded",
+      name,
+      messages: loadedMessages,
+      carryover: {
+        totalCostUsd: meta.totalCostUsd ?? 0,
+        cacheHitTokens: meta.cacheHitTokens ?? 0,
+        cacheMissTokens: meta.cacheMissTokens ?? 0,
+        totalCompletionTokens: meta.totalCompletionTokens ?? 0,
+      },
+    },
+    tab.id,
+  );
+  if (backfilledWorkspace) emitSessions(tab);
 }
 
 function summarizeMcpSpec(raw: string): McpSpecInfo {
@@ -683,12 +849,7 @@ function emitMcpSpecs(tab: Tab): void {
 
 function emitMemory(tab: Tab): void {
   try {
-    const store = new MemoryStore({ projectRoot: tab.rootDir });
-    const entries: MemoryEntryInfo[] = store.list().map((e) => ({
-      name: e.name,
-      scope: e.scope,
-      description: e.description,
-    }));
+    const entries = collectMemoryEntriesForWorkspace(tab.rootDir);
     emit({ type: "$memory", entries }, tab.id);
   } catch (err) {
     emit({ type: "$error", message: `memory_get failed: ${(err as Error).message}` }, tab.id);
@@ -2157,53 +2318,89 @@ export async function desktopCommand(opts: DesktopOptions): Promise<void> {
       }
       return;
     }
-    if (msg.cmd === "session_load") {
+    if (msg.cmd === "session_import") {
       try {
-        const records = loadSessionMessages(msg.name);
-        const meta = loadSessionMeta(msg.name);
-        // Only set switching flag when there's a live turn to abort —
-        // otherwise the flag stays true and suppresses the first turn's events (#1217).
-        if (tab.aborter) tab.switching = true;
-        abortTurn(tab);
-        cancelPendingGates(tab);
-        tab.currentSession = msg.name;
-        persistOpenTabs();
-        if (tab.runtime) tab.runtime = buildRuntimeFor(tab);
-        const loadedMessages = buildLoadedMessages(records);
-        // Empty load is a known silent-failure path (file 0 bytes, all
-        // lines malformed, etc.). Log to stderr so a terminal-launched
-        // desktop reports something diagnostic, and emit a $session_empty
-        // event so the UI can surface "loaded but empty" instead of
-        // looking like the click did nothing. Issue #1179.
-        if (loadedMessages.length === 0) {
-          let sizeBytes = 0;
-          try {
-            sizeBytes = statSync(sessionPath(msg.name)).size;
-          } catch {
-            /* file may not exist */
-          }
-          process.stderr.write(
-            `session_load: "${msg.name}" returned 0 messages (file size=${sizeBytes}B) — empty or unreadable jsonl\n`,
-          );
-          emit({ type: "$session_empty", name: msg.name, sizeBytes }, tab.id);
-        }
+        const result = importExternalSession({
+          source: msg.source,
+          path: msg.path,
+          name: msg.name,
+          workspace: tab.rootDir,
+        });
+        emitSessions(tab);
+        loadSessionIntoTab(tab, result.name, {
+          abortTurn,
+          cancelPendingGates,
+          persistOpenTabs,
+        });
+      } catch (err) {
+        emit(
+          { type: "$error", message: `session_import failed: ${(err as Error).message}` },
+          tab.id,
+        );
+      }
+      return;
+    }
+    if (msg.cmd === "session_import_scan") {
+      try {
+        emit({ type: "$session_import_sources", apps: discoverExternalSessionApps() }, tab.id);
+      } catch (err) {
+        emit(
+          { type: "$error", message: `session_import_scan failed: ${(err as Error).message}` },
+          tab.id,
+        );
+      }
+      return;
+    }
+    if (msg.cmd === "session_import_bulk") {
+      try {
+        const result = importExternalSessions({
+          sources: msg.sources,
+          workspace: tab.rootDir,
+        });
+        emitSessions(tab);
         emit(
           {
-            type: "$session_loaded",
-            name: msg.name,
-            messages: loadedMessages,
-            carryover: {
-              totalCostUsd: meta.totalCostUsd ?? 0,
-              cacheHitTokens: meta.cacheHitTokens ?? 0,
-              cacheMissTokens: meta.cacheMissTokens ?? 0,
-              totalCompletionTokens: meta.totalCompletionTokens ?? 0,
-            },
+            type: "$session_import_result",
+            imported: result.imported,
+            skipped: result.skipped,
+            failed: result.failed,
           },
           tab.id,
         );
+        if (result.latestName) {
+          loadSessionIntoTab(tab, result.latestName, {
+            abortTurn,
+            cancelPendingGates,
+            persistOpenTabs,
+          });
+        }
+      } catch (err) {
+        emit(
+          { type: "$error", message: `session_import_bulk failed: ${(err as Error).message}` },
+          tab.id,
+        );
+      }
+      return;
+    }
+    if (msg.cmd === "session_load") {
+      try {
+        loadSessionIntoTab(tab, msg.name, {
+          abortTurn,
+          cancelPendingGates,
+          persistOpenTabs,
+        });
       } catch (err) {
         process.stderr.write(`session_load: "${msg.name}" threw — ${(err as Error).message}\n`);
         emit({ type: "$error", message: `session_load failed: ${(err as Error).message}` }, tab.id);
+      }
+      return;
+    }
+    if (msg.cmd === "memory_read") {
+      try {
+        const detail = readMemoryEntryDetail({ path: msg.path }, tab.rootDir);
+        emit({ type: "$memory_detail", detail }, tab.id);
+      } catch (err) {
+        emit({ type: "$error", message: `memory_read failed: ${(err as Error).message}` }, tab.id);
       }
       return;
     }
@@ -2248,9 +2445,35 @@ export async function desktopCommand(opts: DesktopOptions): Promise<void> {
         }
         if (msg.editor !== undefined) saveEditor(msg.editor);
         if (msg.showSystemEvents !== undefined) saveShowSystemEvents(msg.showSystemEvents);
-        if (msg.webSearchEngine !== undefined) {
+        if (
+          msg.webSearchEngine !== undefined ||
+          msg.webSearchEndpoint !== undefined ||
+          msg.metasoApiKey !== undefined ||
+          msg.tavilyApiKey !== undefined ||
+          msg.perplexityApiKey !== undefined ||
+          msg.exaApiKey !== undefined ||
+          msg.ollamaApiKey !== undefined
+        ) {
           const cfg = readConfig();
-          cfg.webSearchEngine = msg.webSearchEngine;
+          if (msg.webSearchEngine !== undefined) cfg.webSearchEngine = msg.webSearchEngine;
+          if (msg.webSearchEndpoint !== undefined) {
+            cfg.webSearchEndpoint = msg.webSearchEndpoint?.trim() || undefined;
+          }
+          if (msg.metasoApiKey !== undefined) {
+            cfg.metasoApiKey = msg.metasoApiKey?.trim() || undefined;
+          }
+          if (msg.tavilyApiKey !== undefined) {
+            cfg.tavilyApiKey = msg.tavilyApiKey?.trim() || undefined;
+          }
+          if (msg.perplexityApiKey !== undefined) {
+            cfg.perplexityApiKey = msg.perplexityApiKey?.trim() || undefined;
+          }
+          if (msg.exaApiKey !== undefined) {
+            cfg.exaApiKey = msg.exaApiKey?.trim() || undefined;
+          }
+          if (msg.ollamaApiKey !== undefined) {
+            cfg.ollamaApiKey = msg.ollamaApiKey?.trim() || undefined;
+          }
           writeConfig(cfg);
         }
         if (msg.subagentModels !== undefined) {

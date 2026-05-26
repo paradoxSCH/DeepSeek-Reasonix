@@ -9,6 +9,7 @@ import {
   useState,
 } from "react";
 import type React from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { t, type TKey } from "../i18n";
 import { I } from "../icons";
@@ -20,13 +21,14 @@ import { fmtElapsed } from "./live";
 import { Shortcut } from "./shortcut";
 
 export type ReasoningEffort = "low" | "medium" | "high" | "max";
-export type EditMode = "review" | "auto" | "yolo";
+export type EditMode = "review" | "auto" | "yolo" | "plan";
 
 type ModeEntry = { k: EditMode; label: TKey; icon: React.ReactNode; hint: TKey };
 
 const EFFORTS: readonly ReasoningEffort[] = ["low", "medium", "high", "max"];
 
 const MODE_INFO: ModeEntry[] = [
+  { k: "plan", label: "editMode.plan", icon: <I.list size={11} />, hint: "editMode.planHint" },
   { k: "review", label: "editMode.review", icon: <I.shield size={11} />, hint: "editMode.reviewHint" },
   { k: "auto", label: "editMode.auto", icon: <I.zap size={11} />, hint: "editMode.autoHint" },
   { k: "yolo", label: "editMode.yolo", icon: <I.warn size={11} />, hint: "editMode.yoloHint" },
@@ -116,6 +118,17 @@ function atIcon(k: MentionItem["kind"]) {
   return <I.at size={12} />;
 }
 
+function guessImageExtension(mime: string): string {
+  const normalized = mime.toLowerCase();
+  if (normalized === "image/jpeg") return "jpg";
+  if (normalized === "image/png") return "png";
+  if (normalized === "image/gif") return "gif";
+  if (normalized === "image/webp") return "webp";
+  if (normalized === "image/svg+xml") return "svg";
+  const slash = normalized.indexOf("/");
+  return slash >= 0 ? normalized.slice(slash + 1).replace(/[^a-z0-9]+/g, "") || "png" : "png";
+}
+
 export function Composer({
   draft,
   setDraft,
@@ -143,7 +156,7 @@ export function Composer({
   onDequeueSend,
 }: {
   draft: string;
-  setDraft: (s: string) => void;
+  setDraft: React.Dispatch<React.SetStateAction<string>>;
   onSend: () => void;
   onAbort: () => void;
   disabled?: boolean;
@@ -182,6 +195,19 @@ export function Composer({
   const historyRef = useRef<string[]>([]);
   const [browseIdx, setBrowseIdx] = useState(-1);
   const savedDraftRef = useRef("");
+
+  const insertMention = (picked: string) => {
+    const rel =
+      workspaceDir && picked.startsWith(workspaceDir)
+        ? picked.slice(workspaceDir.length).replace(/^[\\/]+/, "")
+        : picked;
+    setDraft((current) =>
+      current ? `${current.replace(/\s+$/, "")} @${rel} ` : `@${rel} `,
+    );
+    setChips((c) => [...c, { kind: "at", label: rel }]);
+    onMentionPicked?.(rel);
+    textareaRef.current?.focus();
+  };
 
   useLayoutEffect(() => {
     const textarea = textareaRef.current;
@@ -230,16 +256,28 @@ export function Composer({
             : undefined,
       });
       if (typeof picked !== "string" || !picked) return;
-      const rel =
-        workspaceDir && picked.startsWith(workspaceDir)
-          ? picked.slice(workspaceDir.length).replace(/^[\\/]+/, "")
-          : picked;
-      setDraft(draft ? `${draft.replace(/\s+$/, "")} @${rel} ` : `@${rel} `);
-      setChips((c) => [...c, { kind: "at", label: rel }]);
-      onMentionPicked?.(rel);
-      textareaRef.current?.focus();
+      insertMention(picked);
     } catch (err) {
       console.error("attach failed", err);
+    }
+  };
+
+  const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = Array.from(e.clipboardData?.items ?? []);
+    const imageItem = items.find((item) => item.type.startsWith("image/"));
+    if (!imageItem) return;
+    const file = imageItem.getAsFile();
+    if (!file) return;
+    e.preventDefault();
+    try {
+      const buffer = await file.arrayBuffer();
+      const savedPath = await invoke<string>("save_clipboard_image", {
+        bytes: buffer,
+        extension: guessImageExtension(file.type),
+      });
+      insertMention(savedPath);
+    } catch (err) {
+      console.error("clipboard image paste failed", err);
     }
   };
 
@@ -275,7 +313,11 @@ export function Composer({
 
   useEffect(() => {
     setActiveIdx(0);
-  }, [items.length, popup?.kind]);
+  }, [popup?.kind]);
+
+  useEffect(() => {
+    setActiveIdx((i) => (items.length ? Math.min(i, items.length - 1) : 0));
+  }, [items.length]);
 
   useEffect(() => {
     if (!popup || popup.kind !== "at" || !onMentionQuery) return;
@@ -536,6 +578,7 @@ export function Composer({
             value={draft}
             placeholder={t("composer.placeholder")}
             onChange={handleChange}
+            onPaste={(e) => void handlePaste(e)}
             onKeyDown={handleKeyDown}
             onCompositionStart={() => { composingRef.current = true; }}
             onCompositionEnd={() => {
@@ -690,7 +733,7 @@ function Popup({
   useEffect(() => {
     requestAnimationFrame(() => {
       const el = listRef.current?.querySelector<HTMLElement>(`[data-active="true"]`);
-      el?.scrollIntoView({ block: "nearest" });
+      el?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
     });
   }, [activeIdx]);
 
@@ -708,7 +751,7 @@ function Popup({
           <I.x size={11} />
         </span>
       </div>
-      <div className="popup-list" ref={listRef}>
+      <div className={kind === "at" ? "popup-list at-popup-list" : "popup-list"} ref={listRef}>
         {items.length === 0 ? (
           <div
             style={{

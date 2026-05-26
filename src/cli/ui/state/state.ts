@@ -29,6 +29,10 @@ export interface StatusBar {
   sessionCost: number;
   balance?: number;
   balanceCurrency?: string;
+  /** User-togglable cost display currency ("USD" or "CNY"). When set, takes
+   *  precedence over `balanceCurrency` for cost formatting. Seeded from
+   *  config on mount; toggle by clicking the turn-cost pill in the status bar. */
+  costDisplayCurrency?: string;
   cacheHit: number;
   /** Last-turn prompt tokens; drives the context-usage pill. */
   promptTokens?: number;
@@ -60,6 +64,10 @@ export interface AgentState {
   readonly lang: LanguageCode;
   readonly session: SessionInfo;
   readonly cards: ReadonlyArray<Card>;
+  /** id → index in `cards`. Mirrors `cards` exactly; rebuilt on any structural change. */
+  readonly cardIndex: ReadonlyMap<CardId, number>;
+  /** Smallest cards-index that still needs elision consideration; monotonic per session. */
+  readonly elideCursor: number;
   readonly composer: ComposerState;
   readonly status: StatusBar;
   readonly focusedCardId: CardId | null;
@@ -68,10 +76,14 @@ export interface AgentState {
 }
 
 export function initialState(session: SessionInfo, cards: ReadonlyArray<Card> = []): AgentState {
+  const cardIndex = new Map<CardId, number>();
+  for (let i = 0; i < cards.length; i++) cardIndex.set(cards[i]!.id, i);
   return {
     lang: getLanguage(),
     session,
     cards,
+    cardIndex,
+    elideCursor: 0,
     composer: {
       value: "",
       cursor: 0,

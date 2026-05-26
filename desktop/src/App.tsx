@@ -12,8 +12,18 @@ import { type Update, check } from "@tauri-apps/plugin-updater";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { CommandPalette, Toast, buildCommands, useCommandPalette } from "./CommandPalette";
 import { WorkspaceProvider } from "./Markdown";
-import { getLang, setLang, t, useLang } from "./i18n";
+import {
+  nextAbortDraftCandidate,
+  restoreAbortedDraft,
+  type AbortDraftSource,
+} from "./abort-draft";
+import { getLang, getLangLabel, getSupportedLangs, setLang, t, useLang } from "./i18n";
 import { I } from "./icons";
+import {
+  buildSlashSettingsDescriptors,
+  parseSlashSettingsCommand,
+  type SlashSettingsCommand,
+} from "./slash-settings";
 import {
   FONT_FAMILY,
   FONT_FAMILY_STACK,
@@ -35,9 +45,12 @@ import type {
   CheckpointVerdict,
   ChoiceVerdict,
   ConfirmationChoice,
+  ExternalSessionApp,
+  ExternalSessionSource,
   IncomingEvent,
   JobInfo,
   McpSpecInfo,
+  MemoryDetail,
   MemoryEntryInfo,
   OutgoingCommand,
   PlanVerdict,
@@ -52,10 +65,16 @@ import { JobsPop } from "./ui/jobs-pop";
 import { useElapsed } from "./ui/live";
 import { AboutModal } from "./ui/about";
 import { SettingsModal, type PageId as SettingsPageId } from "./ui/settings";
+import { JumpBar } from "./ui/jump-bar";
 import { Sidebar } from "./ui/sidebar";
 import { Shortcut, localizeShortcutText, shortcutText } from "./ui/shortcut";
 import { Splash, shouldShowSplash } from "./ui/splash";
 import { StatusBar } from "./ui/statusbar";
+import {
+  StartupFailure,
+  coerceStartupFailure,
+  type StartupFailureState,
+} from "./ui/startup-failure";
 import {
   dispatchDesktopNotifications,
   deriveDesktopNotifications,
@@ -81,6 +100,7 @@ import { useAutoCollapse } from "./ui/useAutoCollapse";
 import { useResizable } from "./ui/useResizable";
 import { useAutoScroll } from "./ui/useAutoScroll";
 import { useDisableTextAssist } from "./ui/useDisableTextAssist";
+import { getThreadMaxWidth } from "./ui/thread-layout";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 const RIGHT_SIDEBAR_COLLAPSE_WIDTH = 1120;
@@ -211,11 +231,12 @@ export type SessionInfo = {
   messageCount: number;
   mtime: string;
   summary?: string;
+  workspaceStatus?: "matched" | "legacy_missing_meta";
 };
 
 export type Settings = {
   reasoningEffort: "low" | "medium" | "high" | "max";
-  editMode: "review" | "auto" | "yolo";
+  editMode: "review" | "auto" | "yolo" | "plan";
   budgetUsd: number | null;
   baseUrl?: string;
   apiKeyPrefix?: string;
@@ -223,7 +244,15 @@ export type Settings = {
   recentWorkspaces: string[];
   model: string;
   editor?: string;
-  webSearchEngine?: "bing" | "searxng" | "metaso" | "tavily" | "perplexity" | "exa";
+  webSearchEngine?: "bing" | "searxng" | "metaso" | "tavily" | "perplexity" | "exa" | "ollama";
+  webSearchEndpoint?: string;
+  webSearchApiKeys?: {
+    metaso?: string;
+    tavily?: string;
+    perplexity?: string;
+    exa?: string;
+    ollama?: string;
+  };
   subagentModels?: Record<string, "flash" | "pro">;
   showSystemEvents?: boolean;
   version: string;
@@ -259,6 +288,7 @@ type State = {
   activePlan: ActivePlan | null;
   usage: UsageStats;
   sessions: SessionInfo[];
+  externalImportSources: ExternalSessionApp[];
   settings: Settings | null;
   qq: QQDesktopSettingsState | null;
   balance: Balance | null;
@@ -270,6 +300,7 @@ type State = {
   /** Files the agent has read or modified this session — paths as the tool args provided them. */
   sessionFiles: SessionFile[];
   memory: MemoryEntryInfo[];
+  memoryDetail: MemoryDetail | null;
   jobs: JobInfo[];
   /** Live "skill running" indicator — set when a `skill_run` RPC dispatches, cleared on `$turn_complete`. */
   activeSkill: SkillOrigin | null;
@@ -312,7 +343,25 @@ type Action =
   | { t: "enqueue_send"; text: string }
   | { t: "dequeue_send"; index: number }
   | { t: "shift_queued_send" }
+  | { t: "settings_patch"; patch: SettingsPatch }
   | { t: "push_status"; text: string };
+
+function sanitizeSettingsPatch(patch: SettingsPatch): Partial<Settings> {
+  const {
+    metasoApiKey: _metaso,
+    tavilyApiKey: _tavily,
+    perplexityApiKey: _perplexity,
+    exaApiKey: _exa,
+    ollamaApiKey: _ollama,
+    webSearchEndpoint,
+    ...rest
+  } = patch;
+  const sanitized: Partial<Settings> = { ...rest };
+  if (webSearchEndpoint !== undefined) {
+    sanitized.webSearchEndpoint = webSearchEndpoint ?? undefined;
+  }
+  return sanitized;
+}
 
 function fallbackSkillDesc(skill: SkillInfo): string {
   const scope =
@@ -390,6 +439,10 @@ export function reduce(state: State, action: Action): State {
       };
     case "incoming":
       return applyIncoming(state, action.event);
+    case "settings_patch":
+      return state.settings
+        ? { ...state, settings: { ...state.settings, ...sanitizeSettingsPatch(action.patch) } }
+        : state;
     case "batch_delta": {
       const collapsed: DeltaBatchItem[] = [];
       for (const item of action.items) {
@@ -812,6 +865,23 @@ export function applyIncoming(state: State, ev: IncomingEvent): State {
       };
     case "$sessions":
       return { ...state, sessions: ev.items };
+    case "$session_import_sources":
+      return { ...state, externalImportSources: ev.apps };
+    case "$session_import_result":
+      return {
+        ...state,
+        messages: [
+          ...state.messages,
+          {
+            kind: "status",
+            text: t("sidebarPanel.importResult", {
+              imported: ev.imported,
+              skipped: ev.skipped,
+              failed: ev.failed,
+            }),
+          },
+        ],
+      };
     case "$mcp_specs":
       return {
         ...state,
@@ -831,7 +901,16 @@ export function applyIncoming(state: State, ev: IncomingEvent): State {
       return { ...state, usage: next };
     }
     case "$memory":
-      return { ...state, memory: ev.entries };
+      return {
+        ...state,
+        memory: ev.entries,
+        memoryDetail:
+          state.memoryDetail && ev.entries.some((entry) => entry.path === state.memoryDetail?.path)
+            ? state.memoryDetail
+            : null,
+      };
+    case "$memory_detail":
+      return { ...state, memoryDetail: ev.detail };
     case "$jobs":
       return { ...state, jobs: ev.items };
     case "$balance":
@@ -886,6 +965,8 @@ export function applyIncoming(state: State, ev: IncomingEvent): State {
           model: ev.model,
           editor: ev.editor,
           webSearchEngine: ev.webSearchEngine,
+          webSearchEndpoint: ev.webSearchEndpoint,
+          webSearchApiKeys: ev.webSearchApiKeys,
           subagentModels: ev.subagentModels,
           showSystemEvents: ev.showSystemEvents,
           version: ev.version,
@@ -1191,11 +1272,6 @@ interface TabRuntimeProps {
   tabId: string;
   active: boolean;
   currency: "CNY" | "USD";
-  pendingUpdate: Update | null;
-  updateStatus: "idle" | "installing" | "error";
-  updateProgress: { downloaded: number; total: number | null } | null;
-  installUpdate: () => void;
-  dismissUpdate: () => void;
   registerDispatch: (tabId: string, d: TabDispatcher | null) => void;
   onNewTab: () => void;
   onCloseTab: () => void;
@@ -1230,11 +1306,6 @@ function TabRuntime({
   tabId,
   active,
   currency,
-  pendingUpdate,
-  updateStatus,
-  updateProgress,
-  installUpdate,
-  dismissUpdate,
   registerDispatch,
   onNewTab,
   onCloseTab,
@@ -1278,6 +1349,7 @@ function TabRuntime({
     activePlan: null,
     usage: zeroUsage(),
     sessions: [],
+    externalImportSources: [],
     settings: null,
     qq: null,
     balance: null,
@@ -1288,6 +1360,7 @@ function TabRuntime({
     skills: [],
     sessionFiles: [],
     memory: [],
+    memoryDetail: null,
     jobs: [],
     activeSkill: null,
     queuedSends: [],
@@ -1319,6 +1392,17 @@ function TabRuntime({
   });
   const wasBusyRef = useRef(false);
   const busyStartedAtRef = useRef<number | null>(null);
+  const abortDraftRef = useRef<string | null>(null);
+  const clearAbortDraft = useCallback(() => {
+    abortDraftRef.current = nextAbortDraftCandidate(abortDraftRef.current, { type: "clear" });
+  }, []);
+  const recordAbortDraft = useCallback((source: AbortDraftSource, text: string) => {
+    abortDraftRef.current = nextAbortDraftCandidate(abortDraftRef.current, {
+      type: "record",
+      source,
+      text,
+    });
+  }, []);
   const openSettingsAt = useCallback((page: SettingsPageId = "general") => {
     setSettingsPage(page);
     setSettingsOpen(true);
@@ -1356,6 +1440,13 @@ function TabRuntime({
     (patch: SettingsPatch) => sendRpc({ cmd: "settings_save", ...patch }),
     [sendRpc],
   );
+  const applySettingsPatch = useCallback(
+    (patch: SettingsPatch) => {
+      dispatch({ t: "settings_patch", patch });
+      saveSettings(patch);
+    },
+    [saveSettings],
+  );
   const loadQQSettings = useCallback(() => sendRpc({ cmd: "qq_status_get" }), [sendRpc]);
   const connectQQ = useCallback(() => sendRpc({ cmd: "qq_connect" }), [sendRpc]);
   const disconnectQQ = useCallback(() => sendRpc({ cmd: "qq_disconnect" }), [sendRpc]);
@@ -1377,9 +1468,10 @@ function TabRuntime({
     [sendRpc],
   );
   const newChat = useCallback(() => {
+    clearAbortDraft();
     sendRpc({ cmd: "new_chat" });
     dispatch({ t: "clear" });
-  }, [sendRpc]);
+  }, [clearAbortDraft, sendRpc]);
 
   const pickWorkspace = useCallback(async () => {
     try {
@@ -1390,12 +1482,13 @@ function TabRuntime({
         defaultPath: state.settings?.workspaceDir,
       });
       if (typeof picked === "string" && picked.length > 0) {
+        clearAbortDraft();
         saveSettings({ workspaceDir: picked });
       }
     } catch (err) {
       console.error("pickWorkspace failed", err);
     }
-  }, [saveSettings, state.settings?.workspaceDir]);
+  }, [clearAbortDraft, saveSettings, state.settings?.workspaceDir]);
 
   const flashToast = useCallback(
     (msg: string, opts?: { yolo?: boolean; duration?: number }) => {
@@ -1403,6 +1496,37 @@ function TabRuntime({
       window.setTimeout(() => setToast(null), opts?.duration ?? 1600);
     },
     [],
+  );
+
+  const applyReasoningEffort = useCallback(
+    (reasoningEffort: Settings["reasoningEffort"]) => {
+      applySettingsPatch({ reasoningEffort });
+      flashToast(t("app.toast.effortSwitched", { effort: reasoningEffort }));
+    },
+    [applySettingsPatch, flashToast],
+  );
+
+  const applyEditMode = useCallback(
+    (mode: Settings["editMode"]) => {
+      applySettingsPatch({ editMode: mode });
+      if (mode === "yolo") {
+        flashToast(t("app.yolo.toast"), { yolo: true, duration: 3000 });
+      } else {
+        flashToast(t("app.toast.modeSwitched", { mode: mode.toUpperCase() }));
+      }
+    },
+    [applySettingsPatch, flashToast],
+  );
+
+  const applySlashSettingsCommand = useCallback(
+    (command: SlashSettingsCommand) => {
+      if (command.type === "reasoningEffort") {
+        applyReasoningEffort(command.reasoningEffort);
+      } else {
+        applyEditMode(command.editMode);
+      }
+    },
+    [applyEditMode, applyReasoningEffort],
   );
 
   // Drag-and-drop: dropping files/folders onto the window inserts them
@@ -1474,6 +1598,13 @@ function TabRuntime({
       const text = (override ?? draft).trim();
       if (!text || !state.ready || state.busy) return;
 
+      const settingsCommand = parseSlashSettingsCommand(text);
+      if (settingsCommand) {
+        applySlashSettingsCommand(settingsCommand);
+        if (!override) setDraft("");
+        return;
+      }
+
       // /btw <question> — route to side-question RPC instead of user_input.
       // Empty payload used to silently swallow the keystroke (#1370); surface
       // the usage hint as a status message so the user knows what's expected.
@@ -1489,6 +1620,7 @@ function TabRuntime({
           return;
         }
         const clientId = `btw-${Date.now()}`;
+        recordAbortDraft("btw", text);
         dispatch({ t: "send_user", text, clientId });
         sendRpc({ cmd: "btw", text: question });
         if (!override) setDraft("");
@@ -1498,10 +1630,16 @@ function TabRuntime({
       const skillMatch = text.match(/^\/([a-zA-Z0-9_-]+)(\s+.*)?$/);
       if (skillMatch) {
         const [, name, args] = skillMatch;
+        if (name === "search-engine" || name === "se") {
+          openSettingsAt("general");
+          if (!override) setDraft("");
+          return;
+        }
         const skill = state.skills.find((s) => s.name === name);
         if (skill) {
           const clientId = `skill-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
           const trimmedArgs = args?.trim() ?? "";
+          recordAbortDraft("skill_run", text);
           dispatch({ t: "start_skill", skill: { name: skill.name, runAs: skill.runAs }, args: trimmedArgs, clientId });
           sendRpc({ cmd: "skill_run", name: skill.name, args: trimmedArgs || undefined });
           if (!override) setDraft("");
@@ -1509,14 +1647,41 @@ function TabRuntime({
         }
       }
       const clientId = `c-${Date.now()}`;
+      recordAbortDraft("user_input", text);
       dispatch({ t: "send_user", text, clientId });
       sendRpc({ cmd: "user_input", text });
       if (!override) setDraft("");
     },
-    [draft, state.ready, state.busy, state.skills, sendRpc],
+    [
+      draft,
+      state.ready,
+      state.busy,
+      state.skills,
+      sendRpc,
+      recordAbortDraft,
+      applySlashSettingsCommand,
+      openSettingsAt,
+    ],
   );
 
-  const abort = useCallback(() => sendRpc({ cmd: "abort" }), [sendRpc]);
+  const abort = useCallback(() => {
+    const restored = restoreAbortedDraft(draft, abortDraftRef.current);
+    clearAbortDraft();
+    if (restored !== null) {
+      setDraft(restored);
+      composerRef.current?.focus();
+    }
+    sendRpc({ cmd: "abort" });
+  }, [clearAbortDraft, draft, sendRpc]);
+
+  useEffect(() => {
+    if (!state.busy) clearAbortDraft();
+  }, [clearAbortDraft, state.busy]);
+
+  const clearConversation = useCallback(() => {
+    clearAbortDraft();
+    dispatch({ t: "clear" });
+  }, [clearAbortDraft]);
 
   // When /retry returns the last user text, set it as the composer draft
   useEffect(() => {
@@ -1776,7 +1941,7 @@ function TabRuntime({
       flashToast(t("app.toast.newSession"));
     },
     clearChat: () => {
-      dispatch({ t: "clear" });
+      clearConversation();
       flashToast(t("app.toast.cleared"));
     },
     focusComposer: () => composerRef.current?.focus(),
@@ -1810,6 +1975,17 @@ function TabRuntime({
     hasMessages: state.messages.length > 0,
   });
 
+  const slashSettingCommands: SlashCmd[] = buildSlashSettingsDescriptors().map(
+    ({ cmd, action }) => ({
+      cmd,
+      desc:
+        action.type === "editMode"
+          ? t("app.cmd.setMode", { mode: action.editMode })
+          : t("app.cmd.setEffort", { effort: action.reasoningEffort }),
+      run: () => applySlashSettingsCommand(action),
+    }),
+  );
+
   const slashCommands: SlashCmd[] = [
     {
       cmd: "/help",
@@ -1820,7 +1996,7 @@ function TabRuntime({
       },
     },
     { cmd: "/new", desc: t("app.cmd.newSession"), run: () => newChat(), kb: shortcutText(["mod", "N"]) },
-    { cmd: "/clear", desc: t("app.cmd.clearChat"), run: () => dispatch({ t: "clear" }) },
+    { cmd: "/clear", desc: t("app.cmd.clearChat"), run: () => clearConversation() },
     { cmd: "/abort", desc: t("app.cmd.abort"), run: () => abort(), kb: "esc" },
     {
       cmd: "/copy",
@@ -1840,6 +2016,12 @@ function TabRuntime({
       },
     },
     { cmd: "/model", desc: t("app.cmd.switchModel"), run: () => openSettingsAt("models") },
+    {
+      cmd: "/search-engine",
+      desc: t("app.cmd.searchEngine"),
+      run: () => openSettingsAt("general"),
+    },
+    ...slashSettingCommands,
     { cmd: "/theme", desc: t("app.cmd.toggleTheme"), run: onToggleTheme },
     {
       cmd: "/currency",
@@ -1850,9 +2032,10 @@ function TabRuntime({
       cmd: "/lang",
       desc: t("app.cmd.toggleLang"),
       run: () => {
-        const next = getLang() === "zh-CN" ? "en" : "zh-CN";
+        const langs = getSupportedLangs();
+        const next = langs[(langs.indexOf(getLang()) + 1) % langs.length] ?? "en";
         setLang(next);
-        const langName = next === "zh-CN" ? t("app.langZH") : t("app.langEN");
+        const langName = getLangLabel(next);
         flashToast(t("app.toast.langSwitched", { lang: langName }));
       },
     },
@@ -1895,6 +2078,7 @@ function TabRuntime({
       desc: s.description?.trim() || fallbackSkillDesc(s),
       insertOnly: true,
       run: () => {
+        recordAbortDraft("skill_run", `/${s.name}`);
         dispatch({
           t: "start_skill",
           skill: { name: s.name, runAs: s.runAs },
@@ -1996,7 +2180,7 @@ function TabRuntime({
           onOpenSettings={() => openSettingsAt("general")}
           onCopy={conversationCopy}
           onExport={exportConversation}
-          onClear={() => dispatch({ t: "clear" })}
+          onClear={clearConversation}
           hasMessages={state.messages.length > 0}
         />
 
@@ -2016,11 +2200,22 @@ function TabRuntime({
 
         <Sidebar
           sessions={state.sessions}
+          importSources={state.externalImportSources}
           activeName={state.currentSession}
           onNewChat={newChat}
-          onLoadSession={(name) => sendRpc({ cmd: "session_load", name })}
+          onLoadSession={(name) => {
+            clearAbortDraft();
+            sendRpc({ cmd: "session_load", name });
+          }}
           onDeleteSession={(name) => sendRpc({ cmd: "session_delete", name })}
           onRenameSession={(name, title) => sendRpc({ cmd: "session_rename", name, title })}
+          onRefreshImportSources={() => sendRpc({ cmd: "session_import_scan" })}
+          onImportDetectedSessions={(sources: ExternalSessionSource[]) =>
+            sendRpc({ cmd: "session_import_bulk", sources })
+          }
+          onImportSession={({ source, path, name }) =>
+            sendRpc({ cmd: "session_import", source, path, ...(name ? { name } : {}) })
+          }
           onOpenSettings={() => openSettingsAt("general")}
           onOpenRules={() => openSettingsAt("rules")}
           onOpenCommands={() => palette.setOpen(true)}
@@ -2037,6 +2232,7 @@ function TabRuntime({
         ) : null}
 
         <main className="main" style={{ position: "relative" }}>
+          <JumpBar messages={state.messages} threadEl={threadRef.current} />
           {state.needsSetup ? (
             <NeedsSetupView
               workspaceDir={state.settings?.workspaceDir}
@@ -2062,17 +2258,6 @@ function TabRuntime({
               />
               <div className="thread" ref={threadRef}>
                 <div className="thread-inner" ref={threadInnerRef}>
-                  {pendingUpdate ? (
-                    <UpdateBanner
-                      version={pendingUpdate.version}
-                      currentVersion={pendingUpdate.currentVersion}
-                      status={updateStatus}
-                      progress={updateProgress}
-                      onInstall={installUpdate}
-                      onDismiss={dismissUpdate}
-                    />
-                  ) : null}
-
                   {state.activePlan ? (
                     <>
                       <PlanBanner
@@ -2107,7 +2292,7 @@ function TabRuntime({
                       const prev = state.messages[i - 1];
                       const needsDivider = !prev || prev.kind === "user";
                       return (
-                        <div key={`u-${i}`}>
+                        <div key={`u-${i}`} data-turn={m.turn}>
                           {needsDivider ? <TurnDivider label={dividerLabel} /> : null}
                           <UserMsg text={m.text} skill={m.skill} onEdit={onEditUserMsg} />
                         </div>
@@ -2283,22 +2468,12 @@ function TabRuntime({
                 modelLabel={state.settings?.model ?? "deepseek-v4-flash"}
                 reasoningEffort={state.settings?.reasoningEffort ?? "high"}
                 onModelChange={(model) => {
-                  saveSettings({ model });
+                  applySettingsPatch({ model });
                   flashToast(t("app.toast.modelSwitched", { model }));
                 }}
-                onEffortChange={(reasoningEffort) => {
-                  saveSettings({ reasoningEffort });
-                  flashToast(t("app.toast.effortSwitched", { effort: reasoningEffort }));
-                }}
+                onEffortChange={applyReasoningEffort}
                 editMode={state.settings?.editMode ?? "review"}
-                onEditModeChange={(mode) => {
-                  saveSettings({ editMode: mode });
-                  if (mode === "yolo") {
-                    flashToast(t("app.yolo.toast"), { yolo: true, duration: 3000 });
-                  } else {
-                    flashToast(t("app.toast.modeSwitched", { mode: mode.toUpperCase() }));
-                  }
-                }}
+                onEditModeChange={applyEditMode}
                 workspaceDir={state.settings?.workspaceDir}
                 slashCommands={slashCommands}
                 onMentionQuery={queryMentions}
@@ -2324,7 +2499,6 @@ function TabRuntime({
             onMouseDown={onCtxResizeDown}
           />
         ) : null}
-
         <ContextPanel
           settings={state.settings}
           usage={state.usage}
@@ -2332,6 +2506,8 @@ function TabRuntime({
           mcpBridged={state.mcpBridged}
           sessionFiles={state.sessionFiles}
           memory={state.memory}
+          memoryDetail={state.memoryDetail}
+          onReadMemory={(path) => sendRpc({ cmd: "memory_read", path })}
         />
 
         <StatusBar
@@ -2367,7 +2543,10 @@ function TabRuntime({
           recent={state.settings?.recentWorkspaces ?? []}
           current={state.settings?.workspaceDir}
           anchor={wdAnchor}
-          onPick={(path) => saveSettings({ workspaceDir: path })}
+          onPick={(path) => {
+            clearAbortDraft();
+            saveSettings({ workspaceDir: path });
+          }}
           onBrowse={pickWorkspace}
         />
 
@@ -2393,6 +2572,8 @@ function TabRuntime({
             mcpSpecs={state.mcpSpecs}
             mcpBridged={state.mcpBridged}
             skills={state.skills}
+            memory={state.memory}
+            memoryDetail={state.memoryDetail}
             qq={state.qq}
             onClose={() => setSettingsOpen(false)}
             onSave={saveSettings}
@@ -2407,6 +2588,7 @@ function TabRuntime({
             onPickWorkspace={pickWorkspace}
             onAddMcpSpec={addMcpSpec}
             onRemoveMcpSpec={removeMcpSpec}
+            onReadMemory={(path) => sendRpc({ cmd: "memory_read", path })}
           />
         ) : null}
 
@@ -2976,7 +3158,7 @@ function NeedsSetupView({
   );
 }
 
-function UpdateBanner({
+function UpdateOverlay({
   version,
   currentVersion,
   status,
@@ -3013,31 +3195,30 @@ function UpdateBanner({
           : t("app.update.installing")
         : t("app.update.clickToInstall");
   return (
-    <div
-      className="plan-banner"
-      style={{ background: "var(--accent-soft)", borderColor: "var(--accent)" }}
-    >
-      <span className="ico">
-        <I.download size={14} />
-      </span>
-      <div className="body">
-        <div className="t">
-          {t("app.update.available", { current: currentVersion, latest: version })}
-        </div>
-        <div className="s">{statusText}</div>
-        {status === "installing" && ratio !== null ? (
-          <div className="meter-mini" aria-label="download progress">
-            <span style={{ width: `${Math.round(ratio * 100)}%` }} />
+    <div className="update-overlay" aria-live="polite">
+      <div className="plan-banner update-overlay-card">
+        <span className="ico">
+          <I.download size={14} />
+        </span>
+        <div className="body">
+          <div className="t">
+            {t("app.update.available", { current: currentVersion, latest: version })}
           </div>
-        ) : null}
-      </div>
-      <div className="prog">
-        <button type="button" onClick={onInstall} disabled={status === "installing"}>
-          {t("app.update.install")}
-        </button>
-        <button type="button" onClick={onDismiss} disabled={status === "installing"}>
-          {t("app.update.later")}
-        </button>
+          <div className="s">{statusText}</div>
+          {status === "installing" && ratio !== null ? (
+            <div className="meter-mini" aria-label="download progress">
+              <span style={{ width: `${Math.round(ratio * 100)}%` }} />
+            </div>
+          ) : null}
+        </div>
+        <div className="prog">
+          <button type="button" onClick={onInstall} disabled={status === "installing"}>
+            {t("app.update.install")}
+          </button>
+          <button type="button" onClick={onDismiss} disabled={status === "installing"}>
+            {t("app.update.later")}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -3055,10 +3236,13 @@ type TabMeta = { id: string; workspaceDir?: string; busy?: boolean };
 export function App() {
   const [tabs, setTabs] = useState<TabMeta[]>([]);
   const [activeTabId, setActiveTabId] = useState<string>("");
+  const [startupFailure, setStartupFailure] = useState<StartupFailureState | null>(null);
+  const [startupRetryNonce, setStartupRetryNonce] = useState(0);
   const dispatchersRef = useRef<Map<string, TabDispatcher>>(new Map());
   const pendingEventsRef = useRef<Map<string, TabAction[]>>(new Map());
   const pendingDeltasRef = useRef<Map<string, DeltaBatchItem[]>>(new Map());
   const rafScheduledRef = useRef(false);
+  const startupStderrRef = useRef<string[]>([]);
   const tabsRef = useRef<TabMeta[]>([]);
   useEffect(() => {
     tabsRef.current = tabs;
@@ -3112,9 +3296,10 @@ export function App() {
 
   const { width: sideWidth, onMouseDown: onSideResizeDown } = useResizable("side", sideCollapsed);
   const { width: ctxWidth, onMouseDown: onCtxResizeDown } = useResizable("ctx", ctxCollapsed);
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
   const visibleSide = sideCollapsed ? 0 : sideWidth;
   const visibleCtx = ctxCollapsed ? 0 : ctxWidth;
-  const threadMaxWidth = Math.max(580, Math.min(window.innerWidth - visibleSide - visibleCtx - 80, 1120));
+  const threadMaxWidth = getThreadMaxWidth({ viewportWidth, visibleSide, visibleCtx });
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -3123,13 +3308,22 @@ export function App() {
     localStorage.setItem("reasonix.themeStyle", themeStyle);
   }, [theme, themeStyle]);
 
+  // Sync --composer-max-width to .app (separate from inline style to avoid React override)
+  const composerRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (!composerRef.current) composerRef.current = document.querySelector(".app");
+    composerRef.current?.style.setProperty("--composer-max-width", `${threadMaxWidth}px`);
+  }, [threadMaxWidth]);
+
   useEffect(() => {
     let raf = 0;
     let prevStage: ResponsiveStage | null = null;
 
     const sync = () => {
       raf = 0;
-      const next = responsiveStage(window.innerWidth);
+      const width = window.innerWidth;
+      setViewportWidth(width);
+      const next = responsiveStage(width);
       if (prevStage === next) return;
       const prev = prevStage;
       prevStage = next;
@@ -3211,6 +3405,10 @@ export function App() {
     }
   }, []);
 
+  const retryStartup = useCallback(() => {
+    setStartupRetryNonce((n) => n + 1);
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -3275,6 +3473,8 @@ export function App() {
     };
 
     const setup = async () => {
+      startupStderrRef.current = [];
+      setStartupFailure(null);
       const subs = await Promise.all([
         listen<{ data: string }>("rpc:event", (e) => {
           try {
@@ -3358,10 +3558,27 @@ export function App() {
           }
         }),
         listen<{ data: string }>("rpc:stderr", (e) => {
+          startupStderrRef.current = [...startupStderrRef.current, e.payload.data].slice(-12);
+          setStartupFailure((prev) =>
+            prev
+              ? coerceStartupFailure(
+                  prev.details[0] ?? t("app.startupFailedUnknown"),
+                  startupStderrRef.current,
+                )
+              : prev,
+          );
           console.warn("[reasonix stderr]", e.payload.data);
         }),
         listen<{ code: number | null }>("rpc:exit", (e) => {
           for (const tabId of dispatchersRef.current.keys()) flushTabDeltas(tabId);
+          if (dispatchersRef.current.size === 0) {
+            setStartupFailure(
+              coerceStartupFailure(
+                new Error(`reasonix exited (code ${e.payload.code ?? "?"})`),
+                startupStderrRef.current,
+              ),
+            );
+          }
           for (const dispatch of dispatchersRef.current.values()) {
             dispatch({ t: "rpc_exit", code: e.payload.code });
           }
@@ -3383,7 +3600,10 @@ export function App() {
           });
         }
       } catch (err) {
-        if (!cancelled) console.error("rpc_spawn failed", err);
+        if (!cancelled) {
+          setStartupFailure(coerceStartupFailure(err, startupStderrRef.current));
+          console.error("rpc_spawn failed", err);
+        }
       }
     };
     void setup();
@@ -3391,7 +3611,7 @@ export function App() {
       cancelled = true;
       for (const c of cleanups) c();
     };
-  }, [deliverToTab]);
+  }, [deliverToTab, startupRetryNonce]);
 
   // Tell the backend which tab is focused so a restart can reopen on it (#1244).
   useEffect(() => {
@@ -3470,6 +3690,10 @@ export function App() {
     });
   }, []);
 
+  if (startupFailure && tabs.length === 0) {
+    return <StartupFailure details={startupFailure.details} onRetry={retryStartup} />;
+  }
+
   return (
     <>
       {tabs.map((t) => (
@@ -3478,11 +3702,6 @@ export function App() {
           tabId={t.id}
           active={t.id === activeTabId}
           currency={currency}
-          pendingUpdate={pendingUpdate}
-          updateStatus={updateStatus}
-          updateProgress={updateProgress}
-          installUpdate={installUpdate}
-          dismissUpdate={() => setPendingUpdate(null)}
           registerDispatch={registerDispatch}
           onNewTab={openTab}
           onCloseTab={() => closeTab(t.id)}
@@ -3513,6 +3732,16 @@ export function App() {
           setActiveTabId={setActiveTabId}
         />
       ))}
+      {pendingUpdate ? (
+        <UpdateOverlay
+          version={pendingUpdate.version}
+          currentVersion={pendingUpdate.currentVersion}
+          status={updateStatus}
+          progress={updateProgress}
+          onInstall={installUpdate}
+          onDismiss={() => setPendingUpdate(null)}
+        />
+      ) : null}
     </>
   );
 }

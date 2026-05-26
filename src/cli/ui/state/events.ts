@@ -122,6 +122,7 @@ const sessionUpdate = z.object({
     sessionCost: z.number().optional(),
     balance: z.number().optional(),
     balanceCurrency: z.string().optional(),
+    costDisplayCurrency: z.string().optional(),
     cacheHit: z.number().optional(),
   }),
 });
@@ -236,6 +237,10 @@ const planStepComplete = z.object({
 
 const planDrop = z.object({
   type: z.literal("plan.drop"),
+});
+
+const planIdle = z.object({
+  type: z.literal("plan.idle"),
 });
 
 const usageShow = z.object({
@@ -364,6 +369,7 @@ export const AgentEventSchema = z.discriminatedUnion("type", [
   planShow,
   planStepComplete,
   planDrop,
+  planIdle,
   ctxShow,
   doctorShow,
   usageShow,

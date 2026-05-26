@@ -1,7 +1,14 @@
-// First import — re-execs the process with a bigger V8 heap when Node's
-// stock 2 GiB cap is in force (issue #1011). Side-effect on module load,
-// before any heavy import below runs.
+// First import — reject unsupported Node versions before heavier startup
+// paths can turn an engine mismatch into an opaque crash.
+import "./node-version-guard.js";
+
+// Then re-exec with a bigger V8 heap when Node's stock 2 GiB cap is in force
+// (issue #1011). Side-effect on module load, before any heavy import below runs.
 import "./heap-limit-launch.js";
+
+// Wrap stdout/stderr before any third-party lib gets a chance to emit BEL on
+// Windows cmd, which would beep the system bell every render (#1786).
+import "./strip-bel.js";
 
 import { Command } from "commander";
 import {
@@ -48,6 +55,7 @@ const cliNoProxy = process.argv.includes("--no-proxy");
 const cfgProxy = loadProxyConfig();
 installProxyIfConfigured(process.env, {
   disabled: cliNoProxy || cfgProxy.disabled === true,
+  url: cfgProxy.url,
   extraNoProxy: cfgProxy.noProxy,
   bypassDeepSeekDirect: cfgProxy.bypassDeepSeekDirect,
 });

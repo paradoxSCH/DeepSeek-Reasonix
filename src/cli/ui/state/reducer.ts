@@ -1,4 +1,5 @@
 import { extractToolExitCode } from "../tool-summary.js";
+import { elideFromCursor } from "./card-elision.js";
 import type {
   Card,
   CardId,
@@ -221,6 +222,8 @@ export function reduce(state: AgentState, event: AgentEvent): AgentState {
       return {
         ...state,
         cards: [],
+        cardIndex: new Map(),
+        elideCursor: 0,
         focusedCardId: null,
         toasts: [],
         status: {
@@ -234,9 +237,13 @@ export function reduce(state: AgentState, event: AgentEvent): AgentState {
       };
 
     case "session.fork": {
-      const idx = state.cards.findIndex((c) => c.id === event.cardId);
-      if (idx < 0) return state;
-      return { ...state, cards: state.cards.slice(0, idx), focusedCardId: null };
+      const idx = state.cardIndex.get(event.cardId);
+      if (idx === undefined) return state;
+      const cards = state.cards.slice(0, idx);
+      const cardIndex = new Map<CardId, number>();
+      for (let i = 0; i < cards.length; i++) cardIndex.set(cards[i]!.id, i);
+      const elideCursor = Math.min(state.elideCursor, cards.length);
+      return { ...state, cards, cardIndex, elideCursor, focusedCardId: null };
     }
 
     case "session.workspace.change":
@@ -260,18 +267,19 @@ export function reduce(state: AgentState, event: AgentEvent): AgentState {
     case "plan.drop": {
       // Latest still-active plan flips to "replay" — preserves it in scrollback
       // but signals "no longer the live plan" to selectors and UI.
-      let dropped = false;
-      const cards = state.cards.map((c, i) => {
-        if (dropped) return c;
-        if (c.kind !== "plan" || c.variant !== "active") return c;
-        // Walk from end — only the LAST active plan should drop.
-        if (state.cards.slice(i + 1).some((cc) => cc.kind === "plan" && cc.variant === "active")) {
-          return c;
+      let lastActiveIdx = -1;
+      for (let i = state.cards.length - 1; i >= 0; i--) {
+        const c = state.cards[i]!;
+        if (c.kind === "plan" && c.variant === "active") {
+          lastActiveIdx = i;
+          break;
         }
-        dropped = true;
-        return { ...c, variant: "replay" as const };
-      });
-      return dropped ? { ...state, cards } : state;
+      }
+      if (lastActiveIdx < 0) return state;
+      const cards = state.cards.slice();
+      const target = cards[lastActiveIdx] as Extract<Card, { kind: "plan" }>;
+      cards[lastActiveIdx] = { ...target, variant: "replay" as const };
+      return { ...state, cards };
     }
 
     case "plan.step.complete": {
@@ -287,6 +295,26 @@ export function reduce(state: AgentState, event: AgentEvent): AgentState {
         if (!stepChanged) return c;
         changed = true;
         return { ...c, steps: c.variant === "active" ? advanceActivePlanSteps(next) : next };
+      });
+      return changed ? { ...state, cards } : state;
+    }
+
+    case "plan.idle": {
+      // Turn ended — nothing is actually executing, so a "running" step on the
+      // live plan is a lie. Demote it back to "queued"; the next mark_step_complete
+      // will re-advance the running marker via advanceActivePlanSteps. Issue #1784.
+      let changed = false;
+      const cards = state.cards.map((c) => {
+        if (c.kind !== "plan" || c.variant !== "active") return c;
+        let stepChanged = false;
+        const next = c.steps.map((s) => {
+          if (s.status !== "running") return s;
+          stepChanged = true;
+          return { ...s, status: "queued" as const };
+        });
+        if (!stepChanged) return c;
+        changed = true;
+        return { ...c, steps: next };
       });
       return changed ? { ...state, cards } : state;
     }
@@ -332,70 +360,12 @@ export function reduce(state: AgentState, event: AgentEvent): AgentState {
   }
 }
 
-/** Heavy card fields older than this many cards get stubbed so a 7-hour session doesn't drag GBs of one-off file reads / reasoning streams / diff hunks through the heap (issue #1031). */
-const RECENT_CARDS_WINDOW = 200;
-/** Don't bother eliding tiny payloads — the stub is itself ~150 chars and the savings aren't worth the lost context. */
-const MIN_ELIDE_OUTPUT_LENGTH = 4096;
-/** Marker for already-elided fields so we don't re-stub on every subsequent append. */
-const ELIDED_TOOL_OUTPUT_PREFIX = "[elided — older than the last ";
-
-function elidedStub(originalChars: number): string {
-  return `${ELIDED_TOOL_OUTPUT_PREFIX}${RECENT_CARDS_WINDOW} cards; ${originalChars.toLocaleString()} chars dropped to save memory. Full output is on disk in the session log.]`;
-}
-
-function stubHeavyContent(c: Card): Card {
-  switch (c.kind) {
-    case "tool": {
-      const out = (c as ToolCard).output;
-      if (typeof out !== "string") return c;
-      if (out.length <= MIN_ELIDE_OUTPUT_LENGTH) return c;
-      if (out.startsWith(ELIDED_TOOL_OUTPUT_PREFIX)) return c;
-      return { ...(c as ToolCard), output: elidedStub(out.length) };
-    }
-    case "reasoning": {
-      const r = c as ReasoningCard;
-      if (r.streaming) return c;
-      if (r.text.length <= MIN_ELIDE_OUTPUT_LENGTH) return c;
-      if (r.text.startsWith(ELIDED_TOOL_OUTPUT_PREFIX)) return c;
-      return { ...r, text: elidedStub(r.text.length) };
-    }
-    case "streaming": {
-      const s = c as StreamingCard;
-      if (!s.done) return c;
-      if (s.text.length <= MIN_ELIDE_OUTPUT_LENGTH) return c;
-      if (s.text.startsWith(ELIDED_TOOL_OUTPUT_PREFIX)) return c;
-      return { ...s, text: elidedStub(s.text.length) };
-    }
-    case "diff": {
-      if (c.hunks.length === 0) return c;
-      let totalChars = 0;
-      for (const h of c.hunks) for (const l of h.lines) totalChars += l.text.length;
-      if (totalChars <= MIN_ELIDE_OUTPUT_LENGTH) return c;
-      return { ...c, hunks: [] };
-    }
-    default:
-      return c;
-  }
-}
-
-function elideOldCardContent(cards: ReadonlyArray<Card>): ReadonlyArray<Card> {
-  // Caller is about to append a new card. Anticipate that — once
-  // cards.length hits the window, the very next append starts eliding.
-  if (cards.length < RECENT_CARDS_WINDOW) return cards;
-  const cutoff = cards.length + 1 - RECENT_CARDS_WINDOW;
-  let next: Card[] | null = null;
-  for (let i = 0; i < cutoff; i++) {
-    const c = cards[i]!;
-    const stubbed = stubHeavyContent(c);
-    if (stubbed === c) continue;
-    if (next === null) next = cards.slice();
-    next[i] = stubbed;
-  }
-  return next ?? cards;
-}
-
 function appendCard(state: AgentState, card: Card): AgentState {
-  return { ...state, cards: [...elideOldCardContent(state.cards), card] };
+  const { cards: elided, cursor } = elideFromCursor(state.cards, state.elideCursor);
+  const cards = [...elided, card];
+  // Mutate the existing index — append-only mutation; structural rebuilds (fork/reset) replace it.
+  (state.cardIndex as Map<CardId, number>).set(card.id, cards.length - 1);
+  return { ...state, cards, cardIndex: state.cardIndex, elideCursor: cursor };
 }
 
 function mutateCard<K extends Card["kind"]>(
@@ -404,10 +374,12 @@ function mutateCard<K extends Card["kind"]>(
   kind: K,
   patch: (card: Extract<Card, { kind: K }>) => Extract<Card, { kind: K }>,
 ): AgentState {
-  const idx = state.cards.findIndex((c) => c.id === id && c.kind === kind);
-  if (idx < 0) return state;
+  const idx = state.cardIndex.get(id);
+  if (idx === undefined) return state;
+  const existing = state.cards[idx];
+  if (!existing || existing.kind !== kind) return state;
   const next = state.cards.slice();
-  next[idx] = patch(state.cards[idx] as Extract<Card, { kind: K }>);
+  next[idx] = patch(existing as Extract<Card, { kind: K }>);
   return { ...state, cards: next };
 }
 

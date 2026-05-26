@@ -35,6 +35,7 @@ vi.mock("./theme", () => ({
 }));
 
 import { reduce } from "./App";
+import { getThreadMaxWidth } from "./ui/thread-layout";
 
 function initialState(): Parameters<typeof reduce>[0] {
   return {
@@ -60,6 +61,7 @@ function initialState(): Parameters<typeof reduce>[0] {
       reservedTokens: 0,
     },
     sessions: [],
+    externalImportSources: [],
     settings: null,
     qq: null,
     balance: null,
@@ -70,6 +72,7 @@ function initialState(): Parameters<typeof reduce>[0] {
     skills: [],
     sessionFiles: [],
     memory: [],
+    memoryDetail: null,
     jobs: [],
     activeSkill: null,
     queuedSends: [],
@@ -240,5 +243,45 @@ describe("Desktop App reducer — ApprovalPrompt integration", () => {
     const next = reduce(state, { t: "clear" });
     expect(next.pendingConfirms).toHaveLength(0);
     expect(next.pendingPathAccess).toHaveLength(0);
+  });
+
+  it("patches settings optimistically for desktop setting commands", () => {
+    const state: Parameters<typeof reduce>[0] = {
+      ...initialState(),
+      settings: {
+        reasoningEffort: "medium",
+        editMode: "review",
+        budgetUsd: null,
+        workspaceDir: "/workspace",
+        recentWorkspaces: [],
+        model: "deepseek-v4-flash",
+        version: "0.50.1",
+      },
+    };
+
+    const next = reduce(state, {
+      t: "settings_patch",
+      patch: { reasoningEffort: "low", editMode: "auto" },
+    });
+
+    expect(next.settings?.reasoningEffort).toBe("low");
+    expect(next.settings?.editMode).toBe("auto");
+  });
+});
+
+describe("desktop thread layout", () => {
+  it("recomputes the thread cap from the latest viewport width", () => {
+    const side = 244;
+    const ctx = 320;
+
+    expect(
+      getThreadMaxWidth({ viewportWidth: 1000, visibleSide: side, visibleCtx: ctx }),
+    ).toBe(580);
+    expect(
+      getThreadMaxWidth({ viewportWidth: 1400, visibleSide: side, visibleCtx: ctx }),
+    ).toBe(756);
+    expect(
+      getThreadMaxWidth({ viewportWidth: 1800, visibleSide: side, visibleCtx: ctx }),
+    ).toBe(1120);
   });
 });

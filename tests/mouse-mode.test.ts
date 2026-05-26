@@ -6,6 +6,7 @@ describe("mouse-mode enable/disable", () => {
   let origWrite: typeof process.stdout.write;
   let origIsTTY: boolean | undefined;
   let origModeEnv: string | undefined;
+  let origTermProgram: string | undefined;
 
   beforeEach(() => {
     writes = [];
@@ -17,8 +18,11 @@ describe("mouse-mode enable/disable", () => {
     origIsTTY = process.stdout.isTTY;
     Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
     origModeEnv = process.env.REASONIX_MOUSE_MODE;
+    origTermProgram = process.env.TERM_PROGRAM;
     // biome-ignore lint/performance/noDelete: env restoration needs absence, not "undefined"
     delete process.env.REASONIX_MOUSE_MODE;
+    // biome-ignore lint/performance/noDelete: env restoration needs absence, not "undefined"
+    delete process.env.TERM_PROGRAM;
     // Reset module state — disable first to clear `active` from any prior test.
     disableMouseMode();
     writes.length = 0;
@@ -33,6 +37,12 @@ describe("mouse-mode enable/disable", () => {
       delete process.env.REASONIX_MOUSE_MODE;
     } else {
       process.env.REASONIX_MOUSE_MODE = origModeEnv;
+    }
+    if (origTermProgram === undefined) {
+      // biome-ignore lint/performance/noDelete: env restoration needs absence, not "undefined"
+      delete process.env.TERM_PROGRAM;
+    } else {
+      process.env.TERM_PROGRAM = origTermProgram;
     }
   });
 
@@ -50,6 +60,12 @@ describe("mouse-mode enable/disable", () => {
     expect(writes).toEqual([]);
   });
 
+  it("does not send default mouse reset sequences to Apple Terminal", () => {
+    process.env.TERM_PROGRAM = "Apple_Terminal";
+    enableMouseMode();
+    expect(writes).toEqual([]);
+  });
+
   it("REASONIX_MOUSE_MODE=sgr forces ?1000h + ?1006h capture even off Windows", () => {
     process.env.REASONIX_MOUSE_MODE = "sgr";
     enableMouseMode();
@@ -57,6 +73,11 @@ describe("mouse-mode enable/disable", () => {
     writes.length = 0;
     disableMouseMode();
     expect(writes.join("")).toBe("\u001b[?1006l\u001b[?1000l");
+  });
+
+  it("app history scroll mode enables SGR mouse tracking by default", () => {
+    enableMouseMode("app");
+    expect(writes.join("")).toBe("\u001b[?1000h\u001b[?1006h");
   });
 
   it("REASONIX_MOUSE_MODE=alternate-scroll forces ?1007h even on Windows", () => {

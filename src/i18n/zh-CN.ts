@@ -336,8 +336,8 @@ export const zhCN: TranslationSchema = {
     sessions: { description: "列出已保存的会话（当前标记为 ▸）" },
     title: { description: "让模型根据当前对话重命名此会话" },
     qq: {
-      description: "连接、查看或断开当前会话的 QQ 通道（首次连接会引导录入 App ID / App Secret）",
-      argsHint: "[connect [appId appSecret [sandbox]]|status|disconnect]",
+      description:
+        "连接/查看/断开 QQ 通道，首次连接需提供 AppId + AppSecret（可选沙箱模式 sandbox）",
     },
     setup: { description: "提醒您退出并运行 `reasonix setup`" },
     semantic: {
@@ -408,8 +408,8 @@ export const zhCN: TranslationSchema = {
     },
     "search-engine": {
       description:
-        "切换网络搜索后端 — bing（默认，国内裸 IP 直连）、searxng（自托管）、metaso（每日 100 次）、tavily（每月 1000 次免费）、perplexity（AI 直接回答）或 exa（AI 直接回答）",
-      argsHint: "<bing|searxng|metaso|tavily|perplexity|exa> [<key>]",
+        "切换网络搜索后端 — bing（默认，国内裸 IP 直连）、searxng（自托管）、metaso（每日 100 次）、tavily（每月 1000 次免费）、perplexity（AI 直接回答）、exa（AI 直接回答）或 ollama（Ollama 云端搜索）",
+      argsHint: "<bing|searxng|metaso|tavily|perplexity|exa|ollama> [<key>]",
     },
   },
   wizard: {
@@ -698,6 +698,10 @@ export const zhCN: TranslationSchema = {
       " 建议：(1) 检查网络，(2) 等 30 秒后重试，(3) 查看状态页 https://status.deepseek.com。",
     deepseek5xxActionRetry:
       " 建议：(1) 等 30 秒后重试，(2) 用 /model 切换模型，(3) 查看状态页 https://status.deepseek.com。",
+    upstream5xxHead:
+      "上游服务不可用（{status}），目标地址 {host} — 你配置的 API 端点返回了服务器错误，不是 Reasonix 故障。已按指数退避重试 4 次。",
+    upstream5xxActionRetry:
+      " 建议：(1) 确认本地/代理模型服务在线，(2) 等一会儿再重试，(3) 用 /model 切换模型。",
     innerNoMessage: "（无错误信息）",
     reasonAborted: "[用户已中断（Esc） — 正在总结到目前为止的发现]",
     reasonContextGuard: "[上下文额度即将耗尽 — 在下一次调用溢出之前先总结]",
@@ -899,6 +903,7 @@ export const zhCN: TranslationSchema = {
       modelSet: "model → {id}",
       effortStatus: "effort → {current}   （可选：{list}）",
       effortUsage: "用法：/effort <{list}>   （high 为安全默认；max 是 DeepSeek 扩展）",
+      effortUsageNoMax: "用法：/effort <{list}>",
       effortSet: "effort → {effort}",
       budgetNoCap:
         "未设置会话预算 — Reasonix 将持续运行直到您停止。使用以下方式设置：/budget <usd>   （例如 /budget 5）",
@@ -1133,6 +1138,8 @@ export const zhCN: TranslationSchema = {
         "  /search-engine perplexity          使用 Perplexity AI（AI 直接回答 + 引用 — 设置 PERPLEXITY_API_KEY 或 config 的 perplexityApiKey；在 https://perplexity.ai/settings/api 获取密钥）",
       usageExa:
         "  /search-engine exa                 使用 Exa API（AI 直接回答 + 引用，每月 1000 次免费 — 设置 EXA_API_KEY 或 config 的 exaApiKey；注册 https://exa.ai）",
+      usageOllama:
+        "  /search-engine ollama              使用 Ollama 云端网页搜索 — 设置 OLLAMA_API_KEY 或 config 的 ollamaApiKey；在 https://ollama.com/settings/keys 获取密钥",
       alias: "别名：/se",
       searxngInfo: "SearXNG 是一个自托管的元搜索引擎（https://github.com/searxng/searxng）。",
       searxngInstall: "安装命令：  docker run -d -p 8080:8080 searxng/searxng",
@@ -1145,6 +1152,8 @@ export const zhCN: TranslationSchema = {
         " 请设置环境变量 PERPLEXITY_API_KEY 或 config 中的 `perplexityApiKey`；在 https://perplexity.ai/settings/api 获取密钥。",
       switchedExaNote:
         " 请设置环境变量 EXA_API_KEY 或 config 中的 `exaApiKey`；注册 https://exa.ai。",
+      switchedOllamaNote:
+        " 请设置环境变量 OLLAMA_API_KEY 或 config 中的 `ollamaApiKey`；在 https://ollama.com/settings/keys 获取密钥。",
       keyNeeded:
         '未配置 "{engine}" 的 API 密钥。\n\n  1. 设置环境变量 {envVar}\n  2. 或内联提供：/search-engine {engine} <your-key>\n  3. 或在 ~/.reasonix/config.json 中添加 "{engine}ApiKey"\n\n完成后重新执行 /search-engine {engine}。',
       keySaved: " API 密钥已保存到配置。",

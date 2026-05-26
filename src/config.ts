@@ -1,11 +1,12 @@
 /** Library reads only DEEPSEEK_API_KEY from env; the CLI bridges config.json → env var. */
 
 import { randomBytes } from "node:crypto";
-import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
 import { type ThemeName, isThemeName, resolveThemeName } from "./cli/ui/theme/tokens.js";
+import { atomicWriteSync } from "./core/atomic-write.js";
 import type { LanguageCode } from "./i18n/types.js";
 import {
   type IndexUserConfig,
@@ -41,6 +42,7 @@ export function isReasoningEffort(value: unknown): value is ReasoningEffort {
 }
 
 export type EngineeringLifecycleMode = "off" | "strict";
+export type HistoryScrollMode = "auto" | "native" | "app";
 
 export type EmbeddingProvider = "ollama" | "openai-compat";
 
@@ -55,6 +57,7 @@ export interface OpenAICompatEmbeddingUserConfig {
   model?: string;
   extraBody?: Record<string, unknown>;
   batchSize?: number;
+  timeoutMs?: number;
 }
 
 export interface SemanticEmbeddingUserConfig {
@@ -133,6 +136,8 @@ export interface RateLimitConfig {
 }
 
 export interface ProxyConfig {
+  /** Proxy URL (e.g. `http://127.0.0.1:7897`, `socks5://host:1080`). Takes precedence over HTTPS_PROXY / HTTP_PROXY / ALL_PROXY env vars when set, so desktop users on Windows can route through Clash without fighting GUI env-var propagation (issue #1868). */
+  url?: string;
   /** Skip proxy detection entirely — equivalent to launching with `--no-proxy`. */
   disabled?: boolean;
   /** Additional NO_PROXY patterns (curl syntax). Additive on top of env NO_PROXY and the default DeepSeek-bypass whitelist. */
@@ -173,8 +178,8 @@ export interface ReasonixConfig {
   session?: string | null;
   setupCompleted?: boolean;
   search?: boolean;
-  /** Web search engine backend: "bing" (default, scrapes cn.bing.com), "searxng" (self-hosted SearXNG), "metaso" (Metaso API), "tavily" (LLM-friendly API, free tier), "perplexity" (Perplexity AI), or "exa" (Exa API). */
-  webSearchEngine?: "bing" | "searxng" | "metaso" | "tavily" | "perplexity" | "exa";
+  /** Web search engine backend: "bing" (default, scrapes cn.bing.com), "searxng" (self-hosted SearXNG), "metaso" (Metaso API), "tavily" (LLM-friendly API, free tier), "perplexity" (Perplexity AI), "exa" (Exa API), or "ollama" (Ollama cloud web search). */
+  webSearchEngine?: "bing" | "searxng" | "metaso" | "tavily" | "perplexity" | "exa" | "ollama";
   /** Base URL for SearXNG instance (default http://localhost:8080). */
   webSearchEndpoint?: string;
   /** Metaso API key. Falls back to METASO_API_KEY env var. */
@@ -185,11 +190,15 @@ export interface ReasonixConfig {
   perplexityApiKey?: string;
   /** Exa API key. Falls back to EXA_API_KEY env var. Free 1000/mo signup at https://exa.ai */
   exaApiKey?: string;
+  /** Ollama cloud API key. Falls back to OLLAMA_API_KEY env var. Used for Ollama web_search/web_fetch. */
+  ollamaApiKey?: string;
 
   /** TUI mouse-wheel scrolling via SGR mouse tracking. Default true. Set false to fall back to native terminal drag-select for copy (then wheel is terminal-dependent — most terminals translate wheel→arrow in alt-screen, some don't). */
   mouseTracking?: boolean;
   /** Rows scrolled per single SGR mouse-wheel report. Default 1 — most terminals emit 2-5 reports per physical notch, so 1 already produces 2-5 rows per notch (#1419). Bump to 3-5 only if your terminal emits one report per notch and scrolling feels slow (#1494). Clamped to [1, 10]. */
   mouseWheelRows?: number;
+  /** Chat-history scrolling: "native" leaves terminal scrollback in charge; "app" captures wheel/PgUp/PgDn/End inside the TUI; "auto" enables app mode for terminals with known jumpy native scrollback. */
+  historyScrollMode?: HistoryScrollMode;
   dashboard?: {
     /** Whether the embedded dashboard auto-starts on launch. Default true. Set false to disable without passing --no-dashboard each time. */
     enabled?: boolean;
@@ -216,6 +225,9 @@ export interface ReasonixConfig {
     showVersion?: boolean;
     showFeedbackHint?: boolean;
   };
+  /** Preferred display currency for costs (e.g. "USD" or "CNY"). When unset, falls back
+   *  to the wallet currency if available, then defaults to CNY. */
+  costCurrency?: string;
   projects?: {
     [absoluteRootDir: string]: {
       shellAllowed?: string[];
@@ -354,9 +366,18 @@ export function loadExaApiKey(path: string = defaultConfigPath()): string | unde
   return undefined;
 }
 
+/** Ollama cloud API key — env > config > undefined. */
+export function loadOllamaApiKey(path: string = defaultConfigPath()): string | undefined {
+  if (process.env.OLLAMA_API_KEY) return process.env.OLLAMA_API_KEY.trim();
+  if (process.env.ollamaApiKey) return process.env.ollamaApiKey.trim();
+  const cfg = readConfig(path).ollamaApiKey;
+  if (cfg && typeof cfg === "string" && cfg.trim()) return cfg.trim();
+  return undefined;
+}
+
 const DEFAULT_OLLAMA_URL = "http://localhost:11434";
 const DEFAULT_EMBED_MODEL = "nomic-embed-text";
-const DEFAULT_TIMEOUT_MS = 30_000;
+const DEFAULT_TIMEOUT_MS = 180_000;
 const DEFAULT_BATCH_SIZE = 10;
 
 export function defaultConfigPath(): string {
@@ -474,13 +495,7 @@ export function writeConfig(cfg: ReasonixConfig, path: string = defaultConfigPat
   // saveX would silently overwrite every other field with that empty
   // baseline (issue #1535).
   const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(cfg, null, 2), "utf8");
-  try {
-    chmodSync(tmp, 0o600);
-  } catch {
-    /* ignore on platforms without chmod */
-  }
-  renameSync(tmp, path);
+  atomicWriteSync(path, JSON.stringify(cfg, null, 2), tmp);
 }
 
 /** Resolve the language from config file. */
@@ -625,11 +640,18 @@ export interface ResolvedEndpoint {
   apiKey: string | undefined;
 }
 
+// DEEPSEEK_BASE_URL is the original name; DEEPSEEK_API_BASE_URL is accepted as an
+// alias so users who copy the OPENAI_BASE_URL pattern land on a working name (#1876).
+export function resolveBaseUrlEnv(): string | undefined {
+  return process.env.DEEPSEEK_BASE_URL || process.env.DEEPSEEK_API_BASE_URL || undefined;
+}
+
 // (baseUrl, apiKey) is a tuple: whichever source defines baseUrl owns apiKey too,
 // so a stale env DEEPSEEK_API_KEY doesn't bleed into a custom config baseUrl (#1631).
 export function loadEndpoint(path: string = defaultConfigPath()): ResolvedEndpoint {
-  if (process.env.DEEPSEEK_BASE_URL) {
-    return { baseUrl: process.env.DEEPSEEK_BASE_URL, apiKey: process.env.DEEPSEEK_API_KEY };
+  const envBaseUrl = resolveBaseUrlEnv();
+  if (envBaseUrl) {
+    return { baseUrl: envBaseUrl, apiKey: process.env.DEEPSEEK_API_KEY };
   }
   const cfg = readConfig(path);
   if (cfg.baseUrl) {
@@ -679,6 +701,7 @@ export function loadProxyConfig(path: string = defaultConfigPath()): ProxyConfig
   const cfg = readConfig(path).proxy;
   if (!cfg || typeof cfg !== "object") return {};
   const out: ProxyConfig = {};
+  if (typeof cfg.url === "string" && cfg.url.trim() !== "") out.url = cfg.url.trim();
   if (cfg.disabled === true) out.disabled = true;
   if (Array.isArray(cfg.noProxy)) {
     const entries = cfg.noProxy.filter(
@@ -702,6 +725,11 @@ export function loadMouseWheelRows(path: string = defaultConfigPath()): number |
   const raw = readConfig(path).mouseWheelRows;
   if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 1) return undefined;
   return Math.min(raw, 10);
+}
+
+export function loadHistoryScrollMode(path: string = defaultConfigPath()): HistoryScrollMode {
+  const raw = readConfig(path).historyScrollMode;
+  return raw === "native" || raw === "app" || raw === "auto" ? raw : "auto";
 }
 
 export function loadToolRateLimit(
@@ -889,13 +917,14 @@ export function loadJavaSourceEnabled(path: string = defaultConfigPath()): boole
 
 export function webSearchEngine(
   path: string = defaultConfigPath(),
-): "bing" | "searxng" | "metaso" | "tavily" | "perplexity" | "exa" {
+): "bing" | "searxng" | "metaso" | "tavily" | "perplexity" | "exa" | "ollama" {
   const cfg = readConfig(path).webSearchEngine;
   if (cfg === "searxng") return "searxng";
   if (cfg === "metaso") return "metaso";
   if (cfg === "tavily") return "tavily";
   if (cfg === "perplexity") return "perplexity";
   if (cfg === "exa") return "exa";
+  if (cfg === "ollama") return "ollama";
   // Any other value (including legacy "mojeek" from configs predating the
   // engine swap) falls through to bing. Read-only — we never rewrite the
   // user's config, so `/search-engine mojeek` later still rejects loudly.
@@ -1155,7 +1184,7 @@ export function loadModel(path: string = defaultConfigPath()): string {
   const trimmed = typeof raw === "string" ? raw.trim() : "";
   if (!trimmed) return DEFAULT_MODEL;
   // Custom-endpoint owners pick their own model namespace; trust them.
-  const customEndpoint = cfg.baseUrl?.trim() || process.env.DEEPSEEK_BASE_URL;
+  const customEndpoint = cfg.baseUrl?.trim() || resolveBaseUrlEnv();
   if (customEndpoint) return trimmed;
   return SUPPORTED_OFFICIAL_MODELS.includes(trimmed) ? trimmed : DEFAULT_MODEL;
 }
@@ -1317,7 +1346,7 @@ export function resolveSemanticEmbeddingConfig(
       apiKey,
       model,
       extraBody: normalizeExtraBody(user.openaiCompat?.extraBody),
-      timeoutMs: DEFAULT_TIMEOUT_MS,
+      timeoutMs: user.openaiCompat?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       batchSize: user.openaiCompat?.batchSize ?? DEFAULT_BATCH_SIZE,
     };
   }
@@ -1395,6 +1424,7 @@ function normalizeSemanticEmbeddingUserConfig(
       apiKey: normalizeOptionalString(cfg?.openaiCompat?.apiKey),
       model: normalizeOptionalString(cfg?.openaiCompat?.model),
       extraBody: normalizeExtraBody(cfg?.openaiCompat?.extraBody),
+      timeoutMs: normalizePositiveInt(cfg?.openaiCompat?.timeoutMs),
       batchSize: normalizePositiveInt(cfg?.openaiCompat?.batchSize),
     },
   };

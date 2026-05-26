@@ -237,6 +237,7 @@ export const zhCN = {
     webSearchEngineTavily: "tavily — 每月 1000 次免费（设置 TAVILY_API_KEY）",
     webSearchEnginePerplexity: "perplexity — AI 直接回答（设置 PERPLEXITY_API_KEY）",
     webSearchEngineExa: "exa — AI 直接回答，每月 1000 次免费（设置 EXA_API_KEY）",
+    webSearchEngineOllama: "ollama — Ollama 云端网页搜索（设置 OLLAMA_API_KEY）",
     webSearchEngineNote: "下一次 web_search 调用生效",
     sectionBudget: "预算",
     budget: "预算",
@@ -1285,6 +1286,8 @@ export const zhCN = {
     maxDesc: "DeepSeek 扩展；标准 OpenAI / vLLM 会拒绝",
   },
   editMode: {
+    plan: "计划",
+    planHint: "只读模式 · 所有写工具都不会派发",
     review: "审阅",
     reviewHint: "编辑和非允许列表的 shell 命令都会先询问",
     auto: "自动",

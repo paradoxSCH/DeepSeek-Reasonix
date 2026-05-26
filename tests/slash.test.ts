@@ -247,6 +247,33 @@ describe("handleSlash", () => {
     expect(r.info).toMatch(/usage/);
   });
 
+  it("/effort rejects `max` on non-DeepSeek endpoints (#1794)", () => {
+    const client = new DeepSeekClient({
+      apiKey: "sk-test",
+      baseUrl: "http://localhost:8080/v1",
+      fetch: vi.fn() as unknown as typeof fetch,
+    });
+    const loop = new CacheFirstLoop({ client, prefix: new ImmutablePrefix({ system: "s" }) });
+    const r = handleSlash("effort", ["max"], loop);
+    expect(r.info).toMatch(/usage/);
+    expect(r.info).not.toMatch(/\bmax\b/);
+    expect(loop.reasoningEffort).not.toBe("max");
+  });
+
+  it("/effort status on non-DeepSeek endpoint omits `max` from the list (#1794)", () => {
+    const client = new DeepSeekClient({
+      apiKey: "sk-test",
+      baseUrl: "http://localhost:8080/v1",
+      fetch: vi.fn() as unknown as typeof fetch,
+    });
+    const loop = new CacheFirstLoop({ client, prefix: new ImmutablePrefix({ system: "s" }) });
+    const r = handleSlash("effort", [], loop);
+    expect(r.info).toMatch(/low/);
+    expect(r.info).toMatch(/medium/);
+    expect(r.info).toMatch(/high/);
+    expect(r.info).not.toMatch(/\bmax\b/);
+  });
+
   it("/help mentions sessions", () => {
     const r = handleSlash("help", [], makeLoop());
     expect(r.info).toMatch(/\/sessions/);
@@ -295,6 +322,22 @@ describe("handleSlash", () => {
       codeUndo: () => "▸ restored 2 file(s)",
     });
     expect(r.info).toMatch(/restored 2 file/);
+  });
+
+  it("/undo records reverted edits in model context", () => {
+    const loop = makeLoop();
+    const r = handleSlash("undo", [], loop, {
+      codeUndo: () => ({
+        info: "▸ undo: reverted demo.txt from batch #1",
+        contextEvent: { batchId: 1, source: "auto", paths: ["demo.txt"] },
+      }),
+    });
+
+    expect(r.info).toContain("reverted demo.txt");
+    expect(loop.log.entries.at(-1)).toMatchObject({
+      role: "system",
+      content: expect.stringContaining("The user ran /undo and reverted edit batch #1"),
+    });
   });
 
   it("/help mentions /undo and /commit", () => {
@@ -1484,6 +1527,12 @@ describe("handleSlash", () => {
       const r = handleSlash("language", ["EN"], makeLoop());
       expect(getLanguage()).toBe("EN");
       expect(r.info).toBe("Language switched to English.");
+    });
+
+    it("switches to German", () => {
+      const r = handleSlash("language", ["de"], makeLoop());
+      expect(getLanguage()).toBe("de");
+      expect(r.info).toBe("Sprache auf Deutsch umgestellt.");
     });
 
     it("returns error for unsupported language", () => {

@@ -6,7 +6,7 @@ import { isWebRuntime } from "./lib/tauri-bridge";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { CommandPalette, Toast, buildCommands, useCommandPalette } from "./CommandPalette";
 import { WorkspaceProvider } from "./Markdown";
-import { getLang, setLang, t, useLang } from "./i18n";
+import { getLang, getLangLabel, getSupportedLangs, setLang, t, useLang } from "./i18n";
 import { I } from "./icons";
 import {
   FONT_FAMILY,
@@ -32,6 +32,7 @@ import type {
   IncomingEvent,
   JobInfo,
   McpSpecInfo,
+  MemoryDetail,
   MemoryEntryInfo,
   OutgoingCommand,
   PlanVerdict,
@@ -179,11 +180,12 @@ export type SessionInfo = {
   messageCount: number;
   mtime: string;
   summary?: string;
+  workspaceStatus?: "matched" | "legacy_missing_meta";
 };
 
 export type Settings = {
   reasoningEffort: "low" | "medium" | "high" | "max";
-  editMode: "review" | "auto" | "yolo";
+  editMode: "review" | "auto" | "yolo" | "plan";
   budgetUsd: number | null;
   baseUrl?: string;
   apiKeyPrefix?: string;
@@ -191,7 +193,7 @@ export type Settings = {
   recentWorkspaces: string[];
   model: string;
   editor?: string;
-  webSearchEngine?: "bing" | "searxng" | "metaso" | "tavily" | "perplexity" | "exa";
+  webSearchEngine?: "bing" | "searxng" | "metaso" | "tavily" | "perplexity" | "exa" | "ollama";
   subagentModels?: Record<string, "flash" | "pro">;
   showSystemEvents?: boolean;
   version: string;
@@ -238,6 +240,7 @@ type State = {
   /** Files the agent has read or modified this session — paths as the tool args provided them. */
   sessionFiles: SessionFile[];
   memory: MemoryEntryInfo[];
+  memoryDetail: MemoryDetail | null;
   jobs: JobInfo[];
   /** Live "skill running" indicator — set when a `skill_run` RPC dispatches, cleared on `$turn_complete`. */
   activeSkill: SkillOrigin | null;
@@ -646,6 +649,23 @@ export function applyIncoming(state: State, ev: IncomingEvent): State {
           },
         ],
       };
+    case "$modal_dismissed":
+      switch (ev.kind) {
+        case "shell":
+          return { ...state, pendingConfirms: [] };
+        case "path":
+          return { ...state, pendingPathAccess: [] };
+        case "choice":
+          return { ...state, pendingChoices: [] };
+        case "plan":
+          return { ...state, pendingPlans: [] };
+        case "checkpoint":
+          return { ...state, pendingCheckpoints: [] };
+        case "revision":
+          return { ...state, pendingRevisions: [] };
+        default:
+          return state;
+      }
     case "$step_completed": {
       if (!state.activePlan) return state;
       const stepIds = new Set(state.activePlan.completedStepIds);
@@ -679,7 +699,16 @@ export function applyIncoming(state: State, ev: IncomingEvent): State {
     case "$ctx_breakdown":
       return { ...state, usage: { ...state.usage, reservedTokens: ev.reservedTokens } };
     case "$memory":
-      return { ...state, memory: ev.entries };
+      return {
+        ...state,
+        memory: ev.entries,
+        memoryDetail:
+          state.memoryDetail && ev.entries.some((entry) => entry.path === state.memoryDetail?.path)
+            ? state.memoryDetail
+            : null,
+      };
+    case "$memory_detail":
+      return { ...state, memoryDetail: ev.detail };
     case "$jobs":
       return { ...state, jobs: ev.items };
     case "$balance":
@@ -1105,6 +1134,7 @@ function TabRuntime({
     skills: [],
     sessionFiles: [],
     memory: [],
+    memoryDetail: null,
     jobs: [],
     activeSkill: null,
     queuedSends: [],
@@ -1352,7 +1382,7 @@ function TabRuntime({
 
   const resolveConfirm = useCallback(
     (id: number, response: ConfirmationChoice) => {
-      sendRpc({ cmd: "confirm_response", id, response });
+      sendRpc({ cmd: "confirm_response", id, response, kind: "shell" });
       dispatch({ t: "resolve_confirm", id });
     },
     [sendRpc],
@@ -1371,7 +1401,7 @@ function TabRuntime({
   );
   const resolvePathAccess = useCallback(
     (id: number, response: ConfirmationChoice) => {
-      sendRpc({ cmd: "confirm_response", id, response });
+      sendRpc({ cmd: "confirm_response", id, response, kind: "path" });
       dispatch({ t: "resolve_path_access", id });
     },
     [sendRpc],
@@ -1601,9 +1631,10 @@ function TabRuntime({
       cmd: "/lang",
       desc: t("app.cmd.toggleLang"),
       run: () => {
-        const next = getLang() === "zh-CN" ? "en" : "zh-CN";
+        const langs = getSupportedLangs();
+        const next = langs[(langs.indexOf(getLang()) + 1) % langs.length] ?? "en";
         setLang(next);
-        const langName = next === "zh-CN" ? t("app.langZH") : t("app.langEN");
+        const langName = getLangLabel(next);
         flashToast(t("app.toast.langSwitched", { lang: langName }));
       },
     },
@@ -2052,6 +2083,8 @@ function TabRuntime({
           mcpBridged={state.mcpBridged}
           sessionFiles={state.sessionFiles}
           memory={state.memory}
+          memoryDetail={state.memoryDetail}
+          onReadMemory={(path) => sendRpc({ cmd: "memory_read", path })}
         />
 
         <StatusBar
@@ -2121,6 +2154,8 @@ function TabRuntime({
             mcpSpecs={state.mcpSpecs}
             mcpBridged={state.mcpBridged}
             skills={state.skills}
+            memory={state.memory}
+            memoryDetail={state.memoryDetail}
             qq={state.qq}
             onClose={() => setSettingsOpen(false)}
             onSave={saveSettings}
@@ -2135,6 +2170,7 @@ function TabRuntime({
             onPickWorkspace={pickWorkspace}
             onAddMcpSpec={addMcpSpec}
             onRemoveMcpSpec={removeMcpSpec}
+            onReadMemory={(path) => sendRpc({ cmd: "memory_read", path })}
           />
         ) : null}
 

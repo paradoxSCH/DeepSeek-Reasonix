@@ -1,6 +1,14 @@
 /** SEARCH/REPLACE parsing + application — fresh temp dir per test. */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import iconv from "iconv-lite";
@@ -221,6 +229,35 @@ describe("applyEditBlock", () => {
     );
     expect(result.status).toBe("applied");
     expect(readFileSync(join(root, "lf.txt"), "utf8")).toBe("LINE1\nLINE2\n");
+  });
+
+  it("preserves symlink targets instead of replacing the link with a regular file", () => {
+    const outside = resolve(root, "..", "outside-symlink-target.txt");
+    const link = join(root, "linked.txt");
+    writeFileSync(outside, "hello world\n", "utf8");
+    let symlinksWorked = true;
+    try {
+      symlinkSync(outside, link);
+    } catch {
+      symlinksWorked = false;
+    }
+    if (!symlinksWorked) {
+      rmSync(outside, { force: true });
+      return;
+    }
+    try {
+      const result = applyEditBlock(
+        { path: "linked.txt", search: "hello", replace: "goodbye", offset: 0 },
+        root,
+      );
+
+      expect(result.status).toBe("applied");
+      expect(lstatSync(link).isSymbolicLink()).toBe(true);
+      expect(readFileSync(outside, "utf8")).toBe("goodbye world\n");
+    } finally {
+      rmSync(link, { force: true });
+      rmSync(outside, { force: true });
+    }
   });
 });
 

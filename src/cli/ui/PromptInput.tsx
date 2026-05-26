@@ -1,3 +1,4 @@
+import chalk from "chalk";
 import { Box, Text, useStdout } from "ink";
 import React, { useEffect, useRef, useState } from "react";
 import { t } from "../../i18n/index.js";
@@ -33,6 +34,14 @@ function hasNonAscii(s: string): boolean {
   return false;
 }
 
+function isPotentialImeCommitInput(s: string): boolean {
+  if (s.length === 0) return false;
+  if (hasNonAscii(s)) return true;
+  // WeChat IME English mode can commit an ASCII word as one burst, then
+  // pass the confirming Enter through as the next key event.
+  return s.length > 1;
+}
+
 export function shouldInlinePaste(content: string): boolean {
   return !content.includes("\n") && content.length <= INLINE_PASTE_THRESHOLD;
 }
@@ -58,6 +67,8 @@ export interface PromptInputProps {
   model?: string;
   /** True when viewing a historical input. */
   isHistoryMode?: boolean;
+  /** True when plan mode is active — shows [PLAN] badge. */
+  planMode?: boolean;
 }
 
 export function PromptInput({
@@ -75,6 +86,7 @@ export function PromptInput({
   mode,
   model,
   isHistoryMode,
+  planMode,
 }: PromptInputProps) {
   const [cursor, setCursor] = useState(value.length);
 
@@ -86,10 +98,12 @@ export function PromptInput({
   const pastesRef = useRef<Map<number, PasteEntry>>(new Map());
   const nextPasteIdRef = useRef<number>(0);
 
-  // CJK IMEs commit the candidate then often pass the trigger Enter through
+  // IMEs commit the candidate then often pass the trigger Enter through
   // as a real keystroke; terminals can't expose composition state. If submit
-  // fires within IME_GUARD_MS of non-ASCII input we treat it as that commit-Enter.
-  const lastNonAsciiInputAtRef = useRef(0);
+  // fires within IME_GUARD_MS of a likely IME commit we treat it as that
+  // commit-Enter. CJK commits are non-ASCII; WeChat English-mode commits are
+  // ASCII bursts rather than ordinary per-key input.
+  const lastImeCommitInputAtRef = useRef(0);
 
   // Refs (not props/state) — multiple keystrokes in one stdin chunk dispatch
   // before re-render, so the handler must read the latest value/cursor.
@@ -132,8 +146,8 @@ export function PromptInput({
       if (ev.input.length > 0) registerPaste(ev.input);
       return;
     }
-    if (ev.input.length > 0 && hasNonAscii(ev.input)) {
-      lastNonAsciiInputAtRef.current = Date.now();
+    if (isPotentialImeCommitInput(ev.input)) {
+      lastImeCommitInputAtRef.current = Date.now();
     }
     const key: MultilineKey = {
       input: ev.input,
@@ -168,8 +182,8 @@ export function PromptInput({
       setCursor(action.cursor);
     }
     if (action.submit) {
-      if (Date.now() - lastNonAsciiInputAtRef.current < IME_GUARD_MS) {
-        lastNonAsciiInputAtRef.current = 0;
+      if (Date.now() - lastImeCommitInputAtRef.current < IME_GUARD_MS) {
+        lastImeCommitInputAtRef.current = 0;
         return;
       }
       const raw = action.submitValue ?? lastLocalValueRef.current;
@@ -210,11 +224,32 @@ export function PromptInput({
   const renderItems = collapseLinesForDisplay(lines, cursorLine);
   const showHugeBufferHints = lines.length > 20;
 
+  // Ink owns cursor positioning end-to-end; out-of-band CUP writes desync
+  // its frame buffer and leave residual glyphs on next diff.
+
+  const borderLabel = (() => {
+    const parts: string[] = [];
+    if (planMode) parts.push(chalk.hex(TONE.warn)(`[${t("statsPanel.modePlan")}]`));
+    if (isHistoryMode) parts.push(chalk.hex(TONE.accent)("↑ history"));
+    if (mode) parts.push(chalk.hex(TONE.brand)(mode));
+    if (model) parts.push(chalk.hex(FG.faint)(model));
+    return parts.length > 0 ? ` ${parts.join(chalk.hex(FG.faint)(" · "))} ` : undefined;
+  })();
+
   return (
-    <Box flexDirection="row">
-      <Box width={1} backgroundColor={TONE.brand} />
-      <Box flexDirection="column" flexGrow={1} paddingX={1} backgroundColor={SURFACE.bgInput}>
-        <Box height={1} />
+    <Box
+      flexDirection="column"
+      paddingX={1}
+      borderStyle="round"
+      borderLeft={false}
+      borderRight={false}
+      borderColor={inputActive ? TONE.brand : FG.faint}
+      borderText={
+        borderLabel ? { content: borderLabel, position: "top", align: "end", offset: 2 } : undefined
+      }
+      width="100%"
+    >
+      <Box flexDirection="column" flexGrow={1}>
         {(() => {
           const rows: React.ReactNode[] = [];
           let firstRowEmitted = false;
@@ -336,16 +371,6 @@ export function PromptInput({
             </Text>
           </Box>
         ) : null}
-        <Box height={1} />
-        {mode || model || isHistoryMode ? (
-          <Box>
-            {isHistoryMode ? <Text color={TONE.accent}>{"  ↑ history"}</Text> : null}
-            <Text color={TONE.brand}>{mode || ""}</Text>
-            {mode && model ? <Text color={FG.faint}>{" · "}</Text> : null}
-            {model ? <Text color={FG.faint}>{model}</Text> : null}
-          </Box>
-        ) : null}
-        <Box height={1} />
         {inputFrozen ? (
           <Box marginTop={1}>
             <Text color={FG.faint}>{"  esc to stop"}</Text>

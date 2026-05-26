@@ -3,6 +3,141 @@
 All notable changes to Reasonix. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.52.0] — 2026-05-26
+
+**Ink renderer in-tree as `@esengine/ink`.** The vendored Ink fork now
+lives as a workspace package (#1847), unblocking TUI-specific
+renderer tweaks (focus, IME, Static append) without forking upstream.
+TUI polish lands on top: guard ASCII IME enter commits so JP/CN IME
+atomic commits don't double-submit (#1874), preserve undo state across
+session context switches (#1810), incremental repaint coverage
+(#1873).
+
+**Desktop — clipboard image paste.** Paste screenshots / copied images
+directly into the composer (#1889); paste path hardened against
+oversized + non-image clipboard payloads (#1897). Sessions exported by
+other local AI apps can be imported into Reasonix (#1894).
+
+**Desktop — JumpBar polish + drag perf.** JumpBar now highlights the
+active message bar and follows the latest one as the thread grows
+(#1813); dot styling pulled into a shared helper (#1892). Sidebar drag
+writes CSS vars directly to the DOM with `content-visibility` on
+messages (#1812) and unit-suffixes the vars to dodge a Chromium
+recompute storm (#1875).
+
+**Desktop — smaller fixes.**
+- Search-engine API key UI + slash command interception (#1867)
+- Mention `@` popup stays stable while filtering (#1850); split
+  kind/length effects in the popup (#1859)
+- Update banner floats above the thread instead of pushing layout
+  (#1865)
+- `memoryDetail` / `onReadMemory` wired through test fixtures so the
+  desktop memory browser is exercisable in unit tests
+
+**Config — base URL + proxy.** `DEEPSEEK_API_BASE_URL` accepted as an
+env alias to the existing base-url override (#1876, #1887), and
+`proxy.url` is now a first-class field in `config.json` (#1881). MCP
+`initialize` no longer leaks LSP-only fields that some servers reject
+(#1861).
+
+**Providers.** Ollama usage parsing tolerates the field-name variants
+recent Ollama versions emit (#1886).
+
+**i18n.**
+- Russian (`ru`) language pack added (#1879)
+- German corrections — capitalization, terminology, coverage (#1878)
+- `/qq` command hints + argsHint localized; English fallback for
+  zh-CN (#1857, #1862)
+
+**Dashboard / UI.**
+- Sync TUI and Web modal state so confirm gate doesn't desync between
+  surfaces (#1831, #1866)
+- Highlight active plan edit mode (#1863)
+- `useEditHistory` no longer re-exports undo-context through itself
+  (#1854)
+
+## [0.51.0] — 2026-05-25
+
+**First paint — session restore 4.5s → 430ms.** Progressive `<Static>`
+mount streams scrollback in chunks instead of mounting the full history
+synchronously (#1761). Combined with index-backed `mutateCard` + O(n)
+`plan.drop` + cursor elide (#1769) and the bump to `ink@7.0.4` (which
+ships the flicker fix we'd been carrying as a patch — patch-package
+machinery is gone, #1809), large session restores no longer block the
+event loop on startup.
+
+**Perf — tokenizer + markdown + search.** BPE tokenizer caches its
+table + bounds per-content counts with a fast-path truncate (#1741),
+so long sessions don't re-tokenize the world on every turn. CodeBlock
+syntax highlight is memoized (#1743). Literal-pattern search bypasses
+the regex worker entirely (#1748). Windows terminal repaint cadence is
+throttled (#1750) and a BEL → ST swap on Windows stdout stops `cmd.exe`
+from beeping on every render frame (#1795).
+
+**Cross-platform robustness.**
+- `EXDEV` fallback for atomic config writes on OneDrive / NTFS reparse
+  points (#1778) — config saves no longer fail on Windows + cloud-sync
+- Apple Terminal mouse-reset crash guarded (#1764); legacy X10 mouse
+  reports without ESC are dropped (#1723); `ESC`-less CSI recovery is
+  refused when followed by typed text (#1771)
+- CLI startup gates on unsupported Node versions with a clear error
+  instead of crashing in the middle of bootstrap (#1757)
+- Desktop bundled Node inherits parent TCC grants on macOS (#1749) so
+  file / microphone permission prompts attach to the app, not the helper
+- Crash-safe atomic rename for edit-block writes (#1721); completed
+  plans archive instead of persisting across sessions (#1700)
+- `.devenv` and `.direnv` are skipped by glob / search / directory_tree (#1706)
+
+**Memory — CLAUDE.md import for Claude Code migration.** Loading
+`CLAUDE.md` and `~/.claude/CLAUDE.md` alongside the existing
+`REASONIX.md` (#1694) lets Claude Code users carry their project /
+user memory directly into Reasonix without rewriting it.
+
+**i18n — German.** Full German (`de`) locale added (#1773) with a
+follow-up correction pass (#1797).
+
+**Desktop polish.**
+- JumpBar message navigation dock (#1725, #1729)
+- File-change summary card after each assistant turn (#1691)
+- Self-heal stale model id; expose plan as 4th editMode (#1699)
+- Restore aborted prompt drafts on relaunch (#1693)
+- Recalc thread width on resize (#1789); right panel scrollbar
+  draggable (#1765); contain long MCP spec strings (#1736)
+- Sync slash setting commands across surfaces (#1724)
+- Surface desktop startup failures instead of silent exit (#1759)
+
+**TUI polish.**
+- Plan-mode `[PLAN]` / `[计划]` badge in input bar (#1742)
+- Forward-delete for `Delete` key (#1735)
+- IME candidate window cursor alignment (#1754)
+- Coalesce prompt cursor sync to reduce flicker (#1768)
+- Demote stuck `running` plan step on turn end (#1784)
+- Hide `max` effort on non-DeepSeek endpoints (#1798)
+- Drop stale "press Cmd-C to copy" startup hint (#1692)
+
+**Dashboard / web mode.**
+- Bootstrap mcp / skills / memory panels in web mode (#1775)
+- Expose new memory browser to web (#1779)
+- Replay active modal on SSE connect so confirm gate isn't stuck (#1770)
+- Restore scroll and memory visibility (#1766)
+- Docs responsive spacing polish (#1785)
+
+**Smaller fixes.**
+- Preserve full tool results when truncated (#1615)
+- Trim long-session retained payloads to bound memory growth (#1799)
+- Drain steer queue on `/new` + `/cwd` so prior intent doesn't leak (#1774)
+- Suppress DeepSeek-specific 5xx hints when host isn't DeepSeek (#1716)
+- `normalizeSemanticEmbeddingUserConfig` preserves `timeoutMs` (#1788)
+- `REASONIX_ACP_SYSTEM_APPEND` env var for system-prompt injection (#1737)
+- Configurable cost-display currency with click-to-toggle (#1710)
+
+**Refactors / internals.**
+- Extract `LruCache` + `TtlLruCache` + `lazy()` helpers from ad-hoc
+  duplicates (#1746)
+- Split stream aggregator + chunked dispatch out of `step()` (#1739)
+- Per-component render trace gated by `REASONIX_TRACE_RENDERS` (#1747);
+  `readStats` API on render trace + real-numbers large-session probe (#1751)
+
 ## [0.50.1] — 2026-05-24
 
 **Install fix — `postinstall` no longer crashes on `npx`.** The

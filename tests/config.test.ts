@@ -59,6 +59,7 @@ describe("config", () => {
   const originalEnv = process.env.DEEPSEEK_API_KEY;
   const originalSearch = process.env.REASONIX_SEARCH;
   const originalBaseUrl = process.env.DEEPSEEK_BASE_URL;
+  const originalApiBaseUrl = process.env.DEEPSEEK_API_BASE_URL;
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "reasonix-test-"));
@@ -69,6 +70,8 @@ describe("config", () => {
     delete process.env.REASONIX_SEARCH;
     // biome-ignore lint/performance/noDelete: same reason
     delete process.env.DEEPSEEK_BASE_URL;
+    // biome-ignore lint/performance/noDelete: same reason
+    delete process.env.DEEPSEEK_API_BASE_URL;
   });
 
   afterEach(() => {
@@ -90,6 +93,12 @@ describe("config", () => {
       delete process.env.DEEPSEEK_BASE_URL;
     } else {
       process.env.DEEPSEEK_BASE_URL = originalBaseUrl;
+    }
+    if (originalApiBaseUrl === undefined) {
+      // biome-ignore lint/performance/noDelete: same reason
+      delete process.env.DEEPSEEK_API_BASE_URL;
+    } else {
+      process.env.DEEPSEEK_API_BASE_URL = originalApiBaseUrl;
     }
   });
 
@@ -161,6 +170,17 @@ describe("config", () => {
   it("loadBaseUrl falls back to config when env unset", () => {
     saveBaseUrl("https://self-hosted.example.com", path);
     expect(loadBaseUrl(path)).toBe("https://self-hosted.example.com");
+  });
+
+  it("loadBaseUrl accepts DEEPSEEK_API_BASE_URL as an alias (#1876)", () => {
+    process.env.DEEPSEEK_API_BASE_URL = "https://nginx-proxy.internal/v1";
+    expect(loadBaseUrl(path)).toBe("https://nginx-proxy.internal/v1");
+  });
+
+  it("loadBaseUrl: DEEPSEEK_BASE_URL wins over the alias when both are set", () => {
+    process.env.DEEPSEEK_BASE_URL = "https://canonical.example.com";
+    process.env.DEEPSEEK_API_BASE_URL = "https://alias.example.com";
+    expect(loadBaseUrl(path)).toBe("https://canonical.example.com");
   });
 
   it("loadBaseUrl returns undefined when nothing set", () => {
@@ -282,6 +302,14 @@ describe("config", () => {
     });
 
     writeConfig({}, path);
+    expect(loadProxyConfig(path)).toEqual({});
+  });
+
+  it("loads proxy.url and trims it; ignores blank values (#1868)", () => {
+    writeConfig({ proxy: { url: "  http://127.0.0.1:7897  " } }, path);
+    expect(loadProxyConfig(path)).toEqual({ url: "http://127.0.0.1:7897" });
+
+    writeConfig({ proxy: { url: "   " } }, path);
     expect(loadProxyConfig(path)).toEqual({});
   });
 
@@ -798,7 +826,15 @@ describe("config", () => {
 
   describe("webSearchEngine", () => {
     it("preserves each known engine end-to-end (no silent tavily→default fall-through, #1309)", () => {
-      for (const engine of ["bing", "searxng", "metaso", "tavily"] as const) {
+      for (const engine of [
+        "bing",
+        "searxng",
+        "metaso",
+        "tavily",
+        "perplexity",
+        "exa",
+        "ollama",
+      ] as const) {
         writeConfig({ webSearchEngine: engine }, path);
         expect(webSearchEngine(path)).toBe(engine);
       }
@@ -830,7 +866,6 @@ describe("config", () => {
         {
           subagentModels: {
             explore: "pro",
-            // biome-ignore lint/suspicious/noExplicitAny: invalid input we want to test the loader's filter
             bogus: "fast" as any,
           },
         },

@@ -841,6 +841,62 @@ describe("CacheFirstLoop (non-streaming)", () => {
     expect(content).toMatch(/truncated/);
   });
 
+  it("shrinks retained tool-call args without starving the tool dispatch", async () => {
+    const reg = new ToolRegistry();
+    const hugeContent = Array.from({ length: 9000 }, (_, i) => `line ${i}: payload ${i}`).join(
+      "\n",
+    );
+    let receivedChars = 0;
+    reg.register<{ path: string; content: string }, string>({
+      name: "write_blob",
+      description: "captures a large write payload",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          content: { type: "string" },
+        },
+        required: ["path", "content"],
+      },
+      fn: async (args) => {
+        receivedChars = args.content.length;
+        return `received ${receivedChars}`;
+      },
+    });
+    const rawArgs = JSON.stringify({ path: "big.txt", content: hugeContent });
+    const responses: FakeResponseShape[] = [
+      {
+        content: "",
+        tool_calls: [
+          { id: "c1", type: "function", function: { name: "write_blob", arguments: rawArgs } },
+        ],
+      },
+      { content: "done." },
+    ];
+    const client = makeClient(responses);
+    const loop = new CacheFirstLoop({
+      client,
+      prefix: new ImmutablePrefix({ system: "s", toolSpecs: reg.specs() }),
+      tools: reg,
+      stream: false,
+    });
+
+    for await (const _ev of loop.step("go")) {
+      /* drain */
+    }
+
+    expect(receivedChars).toBe(hugeContent.length);
+    const assistantEntry = loop.log
+      .toMessages()
+      .find((m) => m.role === "assistant" && (m.tool_calls?.length ?? 0) > 0);
+    expect(assistantEntry).toBeDefined();
+    const savedArgs = assistantEntry!.tool_calls![0]!.function.arguments;
+    expect(savedArgs.length).toBeLessThan(rawArgs.length / 10);
+    const parsed = JSON.parse(savedArgs) as { path: string; content: string };
+    expect(parsed.path).toBe("big.txt");
+    expect(parsed.content).toMatch(/shrunk/);
+  });
+
   it("buildMessages strips a dangling assistant-with-tool_calls tail — defensive against 'insufficient tool messages' 400", async () => {
     // Craft a log where the last entry is an assistant message with
     // tool_calls but no matching tool responses. This is the shape
@@ -1073,6 +1129,36 @@ describe("CacheFirstLoop - setBudget / clearLog / retryLastUser", () => {
     expect(loop.stats.summary().totalCostUsd).toBe(0);
     expect(loop.stats.summary().turns).toBe(0);
     expect(loop.currentTurn).toBe(0);
+  });
+
+  it("clearLog drains the steer queue so the next turn doesn't replay prior intent", async () => {
+    const fetchSpy = vi.fn(
+      async (_url: any, init: any) =>
+        new Response(
+          JSON.stringify({
+            _echo_messages: JSON.parse(init.body).messages,
+            choices: [
+              { index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" },
+            ],
+            usage: { prompt_tokens: 10, completion_tokens: 1, total_tokens: 11 },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    ) as unknown as typeof fetch;
+    const client = new DeepSeekClient({ apiKey: "sk-test", fetch: fetchSpy });
+    const loop = new CacheFirstLoop({
+      client,
+      prefix: new ImmutablePrefix({ system: "s" }),
+      stream: false,
+    });
+    loop.steer("finish the refactor i started in the prior session");
+    loop.clearLog();
+    for await (const _ev of loop.step("hello")) {
+      /* drain */
+    }
+    const sent = JSON.parse((fetchSpy as any).mock.calls[0][1].body).messages as ChatMessage[];
+    const userBodies = sent.filter((m) => m.role === "user").map((m) => m.content);
+    expect(userBodies).toEqual(["hello"]);
   });
 
   it("clearLog returns 0 dropped when already empty", () => {

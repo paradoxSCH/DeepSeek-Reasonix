@@ -424,8 +424,8 @@ export const EN: TranslationSchema = {
     },
     "search-engine": {
       description:
-        "switch web search backend — bing (default, works from CN without proxy), searxng (self-hosted), metaso (free 100/d), tavily (free 1000/mo), perplexity (AI-native), or exa (AI-native)",
-      argsHint: "<bing|searxng|metaso|tavily|perplexity|exa> [<key>]",
+        "switch web search backend — bing (default, works from CN without proxy), searxng (self-hosted), metaso (free 100/d), tavily (free 1000/mo), perplexity (AI-native), exa (AI-native), or ollama (Ollama cloud web search)",
+      argsHint: "<bing|searxng|metaso|tavily|perplexity|exa|ollama> [<key>]",
     },
   },
   wizard: {
@@ -724,6 +724,10 @@ export const EN: TranslationSchema = {
       " Try: (1) check your network, (2) wait 30s and retry, (3) status page: https://status.deepseek.com.",
     deepseek5xxActionRetry:
       " Try: (1) wait 30s and retry, (2) /model to switch model, (3) status page: https://status.deepseek.com.",
+    upstream5xxHead:
+      "Upstream service unavailable ({status}) at {host} — the configured API endpoint returned a server error, not a Reasonix bug. Already retried 4× with backoff.",
+    upstream5xxActionRetry:
+      " Try: (1) check that the local/proxy model server is up, (2) wait and retry, (3) /model to switch model.",
     innerNoMessage: "(no message)",
     reasonAborted: "[aborted by user (Esc) — summarizing what I found so far]",
     reasonContextGuard:
@@ -951,6 +955,7 @@ export const EN: TranslationSchema = {
       effortStatus: "effort → {current}   (pick: {list})",
       effortUsage:
         "usage: /effort <{list}>   (high is the safe default; max is a DeepSeek extension)",
+      effortUsageNoMax: "usage: /effort <{list}>",
       effortSet: "effort → {effort}",
       budgetNoCap:
         "no session budget set — Reasonix will keep going until you stop it. Set one with: /budget <usd>   (e.g. /budget 5)",
@@ -1202,6 +1207,8 @@ export const EN: TranslationSchema = {
         "  /search-engine perplexity          use Perplexity AI (AI-native answer + citations — set PERPLEXITY_API_KEY or perplexityApiKey in config; get one at https://perplexity.ai/settings/api)",
       usageExa:
         "  /search-engine exa                 use Exa API (AI-native answer + citations, free 1000/mo — set EXA_API_KEY or exaApiKey in config; sign up at https://exa.ai)",
+      usageOllama:
+        "  /search-engine ollama              use Ollama cloud web search — set OLLAMA_API_KEY or ollamaApiKey in config; get one at https://ollama.com/settings/keys",
       alias: "Alias: /se",
       searxngInfo:
         "SearXNG is a self-hosted metasearch engine (https://github.com/searxng/searxng).",
@@ -1215,6 +1222,8 @@ export const EN: TranslationSchema = {
       switchedPerplexityNote:
         " Set PERPLEXITY_API_KEY or `perplexityApiKey` in config; get one at https://perplexity.ai/settings/api.",
       switchedExaNote: " Set EXA_API_KEY or `exaApiKey` in config; sign up at https://exa.ai.",
+      switchedOllamaNote:
+        " Set OLLAMA_API_KEY or `ollamaApiKey` in config; get one at https://ollama.com/settings/keys.",
       keyNeeded:
         'No API key configured for "{engine}".\n\n  1. Set the {envVar} environment variable\n  2. Or provide one inline:  /search-engine {engine} <your-key>\n  3. Or add "{engine}ApiKey" to ~/.reasonix/config.json\n\nThen retry /search-engine {engine}.',
       keySaved: " API key saved to config.",

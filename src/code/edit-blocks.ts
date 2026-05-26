@@ -1,14 +1,17 @@
 /** SEARCH must match byte-for-byte; empty SEARCH = create new file. No fuzzy match — silent wrong edit beats a missing one. */
 
 import {
+  chmodSync,
   closeSync,
   existsSync,
   fstatSync,
-  ftruncateSync,
+  fsyncSync,
   mkdirSync,
   openSync,
   readFileSync,
   readSync,
+  realpathSync,
+  renameSync,
   unlinkSync,
   writeFileSync,
   writeSync,
@@ -91,6 +94,61 @@ function pathIsUnder(child: string, parent: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
+function writeAllSync(fd: number, buf: Buffer): void {
+  let written = 0;
+  while (written < buf.length) {
+    const n = writeSync(fd, buf, written, buf.length - written, written);
+    if (n <= 0) throw new Error("write returned 0 bytes before completing");
+    written += n;
+  }
+}
+
+function fsyncDirectoryBestEffort(path: string): void {
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, "r");
+    fsyncSync(fd);
+  } catch {
+    /* directory fsync is best-effort across platforms */
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function atomicReplaceFileSync(path: string, buf: Buffer, mode: number): void {
+  const tmp = `${path}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+  const permissions = mode & 0o7777;
+  let fd: number | undefined;
+  try {
+    fd = openSync(tmp, "wx", permissions);
+    writeAllSync(fd, buf);
+    try {
+      chmodSync(tmp, permissions);
+    } catch {
+      /* preserve mode when the platform allows it */
+    }
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    renameSync(tmp, path);
+    fsyncDirectoryBestEffort(dirname(path));
+  } catch (err) {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* fd may already be closed after a prior failure */
+      }
+    }
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* tmp may not exist */
+    }
+    throw err;
+  }
+}
+
 export function applyEditBlock(block: EditBlock, rootDir: string): ApplyResult {
   const absRoot = resolve(rootDir);
   const absTarget = resolveEditPath(rootDir, block.path);
@@ -135,9 +193,23 @@ export function applyEditBlock(block: EditBlock, rootDir: string): ApplyResult {
   try {
     // Modify path. ENOENT is reported as `file-missing` so the model
     // knows it needs an empty SEARCH to create the file.
-    let fd: number;
+    let writeTarget: string;
     try {
-      fd = openSync(absTarget, "r+");
+      writeTarget = realpathSync(absTarget);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        return {
+          path: block.path,
+          status: "file-missing",
+          message: "file does not exist; to create it, use an empty SEARCH block",
+        };
+      }
+      throw err;
+    }
+
+    let fd: number | undefined;
+    try {
+      fd = openSync(writeTarget, "r+");
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") {
         return {
@@ -182,20 +254,12 @@ export function applyEditBlock(block: EditBlock, rootDir: string): ApplyResult {
       // a footgun when the same string legitimately appears in several
       // unrelated places.
       const replaced = `${content.slice(0, idx)}${adaptedReplace}${content.slice(idx + adaptedSearch.length)}`;
-      // Truncate first so a shorter result doesn't leave stale tail
-      // bytes; ftruncate also pads with NUL when the new length is
-      // longer, which we then overwrite below.
-      const outBuf = encodeFile(replaced, encoding);
-      ftruncateSync(fd, outBuf.length);
-      let written = 0;
-      while (written < outBuf.length) {
-        const n = writeSync(fd, outBuf, written, outBuf.length - written, written);
-        if (n <= 0) break;
-        written += n;
-      }
+      closeSync(fd);
+      fd = undefined;
+      atomicReplaceFileSync(writeTarget, encodeFile(replaced, encoding), stat.mode);
       return { path: block.path, status: "applied" };
     } finally {
-      closeSync(fd);
+      if (fd !== undefined) closeSync(fd);
     }
   } catch (err) {
     return { path: block.path, status: "error", message: (err as Error).message };

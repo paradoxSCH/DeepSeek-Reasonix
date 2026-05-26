@@ -13,7 +13,13 @@ import {
 import { ContextManager, TURN_START_FOLD_THRESHOLD } from "./context-manager.js";
 import { InflightSet } from "./core/inflight.js";
 import { t } from "./i18n/index.js";
-import { formatLoopError, is5xxError, probeDeepSeekReachable } from "./loop/errors.js";
+import { dispatchToolCallsChunked } from "./loop/dispatch.js";
+import {
+  formatLoopError,
+  is5xxError,
+  isDeepSeekHost,
+  probeDeepSeekReachable,
+} from "./loop/errors.js";
 import { type ForceSummaryContext, forceSummaryAfterIterLimit } from "./loop/force-summary.js";
 import {
   fixToolCallPairing,
@@ -23,12 +29,14 @@ import {
 } from "./loop/healing.js";
 import { hookWarnings, safeParseToolArgs } from "./loop/hook-events.js";
 import { buildAssistantMessage, buildSyntheticAssistantMessage } from "./loop/messages.js";
+import { stripDroppableReasoningContent } from "./loop/reasoning-retention.js";
 import {
   looksLikeCompleteJson,
   shrinkOversizedToolCallArgsByTokens,
   shrinkOversizedToolResults,
   shrinkOversizedToolResultsByTokens,
 } from "./loop/shrink.js";
+import { streamModelResponse } from "./loop/streaming.js";
 import {
   isThinkingModeModel,
   stripHallucinatedToolMarkup,
@@ -47,7 +55,6 @@ import {
 import { type RepairReport, ToolCallRepair } from "./repair/index.js";
 import { SessionStats, type TurnStats } from "./telemetry/stats.js";
 import { ToolRegistry } from "./tools.js";
-import { parseRateLimitedToolResult } from "./tools/rate-limit.js";
 import { ReadTracker } from "./tools/read-tracker.js";
 import type { ChatMessage, ToolCall } from "./types.js";
 
@@ -104,6 +111,13 @@ export interface ReconfigurableOptions {
 export interface LoopAbortOptions {
   /** Explicit user interrupts can discard the unfinished turn so the next prompt starts clean. */
   discardCurrentTurn?: boolean;
+}
+
+function shrinkMessageForRetention(message: ChatMessage): ChatMessage {
+  if (message.role !== "assistant" || !Array.isArray(message.tool_calls)) return message;
+  return (
+    shrinkOversizedToolCallArgsByTokens([message], DEFAULT_MAX_RESULT_TOKENS).messages[0] ?? message
+  );
 }
 
 export class CacheFirstLoop {
@@ -219,9 +233,11 @@ export class CacheFirstLoop {
     if (this.sessionName) {
       const prior = loadSessionMessages(this.sessionName);
       const shrunk = healLoadedMessagesByTokens(prior, DEFAULT_MAX_RESULT_TOKENS);
-      // Thinking-mode sessions: API 400s if any historical assistant turn lacks reasoning_content.
+      // Thinking-mode sessions still need tool-call reasoning_content, while stale
+      // plain-turn reasoning can be dropped before it bloats long-session requests.
       const stamped = stampMissingReasoningForThinkingMode(shrunk.messages, this.model);
-      const messages = stamped.messages;
+      const pruned = stripDroppableReasoningContent(stamped.messages);
+      const messages = pruned.messages;
       const healedCount = shrunk.healedCount + stamped.stampedCount;
       const tokensSaved = shrunk.tokensSaved;
       for (const msg of messages) this.log.append(msg);
@@ -240,16 +256,18 @@ export class CacheFirstLoop {
           lastPromptTokens: meta.lastPromptTokens,
         });
       }
-      if (healedCount > 0) {
+      if (healedCount > 0 || pruned.prunedCount > 0) {
         // Persist healed log so the same break isn't re-noticed every restart.
         try {
           rewriteSession(this.sessionName, messages);
         } catch {
           /* disk full / perms — skip, in-memory heal still applies */
         }
-        process.stderr.write(
-          `▸ session "${this.sessionName}": healed ${healedCount} entr${healedCount === 1 ? "y" : "ies"}${tokensSaved > 0 ? ` (shrunk ${tokensSaved.toLocaleString()} tokens of oversized tool output)` : " (dropped dangling tool_calls tail)"}. Rewrote session file.\n`,
-        );
+        if (healedCount > 0) {
+          process.stderr.write(
+            `▸ session "${this.sessionName}": healed ${healedCount} entr${healedCount === 1 ? "y" : "ies"}${tokensSaved > 0 ? ` (shrunk ${tokensSaved.toLocaleString()} tokens of oversized tool output/arguments)` : " (dropped dangling tool_calls tail)"}. Rewrote session file.\n`,
+          );
+        }
       }
     } else {
       this.resumedMessageCount = 0;
@@ -285,10 +303,11 @@ export class CacheFirstLoop {
   }
 
   appendAndPersist(message: ChatMessage): void {
-    this.log.append(message);
+    const retained = shrinkMessageForRetention(message);
+    this.log.append(retained);
     if (this.sessionName) {
       try {
-        appendSessionMessage(this.sessionName, message);
+        appendSessionMessage(this.sessionName, retained);
       } catch {
         /* disk full or permission denied shouldn't kill the chat */
       }
@@ -297,11 +316,12 @@ export class CacheFirstLoop {
 
   /** Swap the just-appended assistant entry — used by self-correction to restore the original tool_calls without dropping reasoning_content. */
   private replaceTailAssistantMessage(message: ChatMessage): void {
+    const retained = shrinkMessageForRetention(message);
     const entries = this.log.entries;
     const tail = entries[entries.length - 1];
     if (!tail || tail.role !== "assistant") return;
     const kept = entries.slice(0, -1);
-    kept.push(message);
+    kept.push(retained);
     this.log.compactInPlace(kept);
     if (this.sessionName) {
       try {
@@ -330,6 +350,10 @@ export class CacheFirstLoop {
     this.stats.reset();
     this._turn = 0;
     this._budgetWarned = false;
+    // Drain leftover steer text — otherwise the first step() after /new
+    // injects it as a user message and the next turn leaks prior intent.
+    this._steerQueue.length = 0;
+    this._steerConsumed = false;
     let systemRebuilt = false;
     if (this._rebuildSystem) {
       try {
@@ -356,6 +380,8 @@ export class CacheFirstLoop {
     this.log.compactInPlace([]);
     this.scratch.reset();
     this._inflight.clear();
+    this._steerQueue.length = 0;
+    this._steerConsumed = false;
     this.sessionName = opts.sessionName;
     if (this._rebuildSystem) {
       try {
@@ -451,6 +477,7 @@ export class CacheFirstLoop {
         maxResultTokens: DEFAULT_MAX_RESULT_TOKENS,
         confirmationGate: this.confirmationGate,
         readTracker: this.readTracker,
+        rootDir: this.hookCwd,
       });
 
       const postReport = await runHooks({
@@ -490,16 +517,23 @@ export class CacheFirstLoop {
   private healActiveLogBeforeSend(): ChatMessage[] {
     const current = this.log.toMessages();
     const healed = healLoadedMessages(current, DEFAULT_MAX_RESULT_CHARS);
-    if (healed.healedCount === 0) return current;
-    this.log.compactInPlace(healed.messages);
+    const argsShrunk = shrinkOversizedToolCallArgsByTokens(
+      healed.messages,
+      DEFAULT_MAX_RESULT_TOKENS,
+    );
+    const pruned = stripDroppableReasoningContent(argsShrunk.messages);
+    if (healed.healedCount === 0 && argsShrunk.healedCount === 0 && pruned.prunedCount === 0) {
+      return current;
+    }
+    this.log.compactInPlace(pruned.messages);
     if (this.sessionName) {
       try {
-        rewriteSession(this.sessionName, healed.messages);
+        rewriteSession(this.sessionName, pruned.messages);
       } catch {
         /* disk issue shouldn't block the in-memory heal */
       }
     }
-    return healed.messages;
+    return pruned.messages;
   }
 
   abort(opts: LoopAbortOptions = {}): void {
@@ -654,7 +688,7 @@ export class CacheFirstLoop {
     const turnStartLogIndex = this.log.length;
     this.appendAndPersist({ role: "user", content: userInput });
     const toolSpecs = this.prefix.tools();
-    let rateLimitWarningShown = false;
+    const rateLimitState = { shown: false };
 
     // Turn-start fold: covers cases the post-response check can't see — terminal
     // prior turn (no tool_calls → no decideAfterUsage), session restore from
@@ -672,7 +706,9 @@ export class CacheFirstLoop {
           role: "status",
           content: t("loop.turnStartFoldStatus"),
         };
-        const result = await this.context.fold(this.model, { requireTailBoundary: true });
+        const result = await this.context.fold(this.model, {
+          requireTailBoundary: true,
+        });
         if (result.folded) {
           this._foldedThisTurn = true;
           yield {
@@ -763,83 +799,19 @@ export class CacheFirstLoop {
 
       try {
         if (this.stream) {
-          const callBuf: Map<number, ToolCall> = new Map();
-          // Indices whose accumulated args have parsed as valid JSON at
-          // least once. Purely informational — we don't dispatch until
-          // the stream ends (that's the eager-dispatch feature we
-          // intentionally punted) but the UI shows "N ready" so the
-          // user sees progress on long multi-tool turns instead of a
-          // stagnant "building tool call" spinner.
-          const readyIndices = new Set<number>();
-          const callModel = this.model;
-          for await (const chunk of this.client.stream({
-            model: callModel,
+          const result = yield* streamModelResponse({
+            client: this.client,
+            model: this.model,
             messages,
-            tools: toolSpecs.length ? toolSpecs : undefined,
+            toolSpecs,
             signal,
-            thinking: thinkingModeForModel(callModel),
             reasoningEffort: this.reasoningEffort,
-          })) {
-            // DeepSeek transition chunks carry both reasoning_content and
-            // content; emit reasoning first so consumers can merge
-            // consecutive same-kind segments instead of fragmenting.
-            if (chunk.reasoningDelta) {
-              reasoningContent += chunk.reasoningDelta;
-              yield {
-                turn: this._turn,
-                role: "assistant_delta",
-                content: "",
-                reasoningDelta: chunk.reasoningDelta,
-              };
-            }
-            if (chunk.contentDelta) {
-              assistantContent += chunk.contentDelta;
-              yield {
-                turn: this._turn,
-                role: "assistant_delta",
-                content: chunk.contentDelta,
-              };
-            }
-            if (chunk.toolCallDelta) {
-              const d = chunk.toolCallDelta;
-              const cur = callBuf.get(d.index) ?? {
-                id: d.id,
-                type: "function" as const,
-                function: { name: "", arguments: "" },
-              };
-              if (d.id) cur.id = d.id;
-              if (d.name) cur.function.name = (cur.function.name ?? "") + d.name;
-              if (d.argumentsDelta)
-                cur.function.arguments = (cur.function.arguments ?? "") + d.argumentsDelta;
-              callBuf.set(d.index, cur);
-
-              // Mark this index "ready" once its args first parse as
-              // valid JSON. JSON.parse is sub-millisecond on typical
-              // tool-call payloads; skip the check once already ready.
-              if (
-                !readyIndices.has(d.index) &&
-                cur.function.name &&
-                looksLikeCompleteJson(cur.function.arguments ?? "")
-              ) {
-                readyIndices.add(d.index);
-              }
-
-              // Skip the id-only opener: name is empty until the next chunk.
-              if (cur.function.name) {
-                yield {
-                  turn: this._turn,
-                  role: "tool_call_delta",
-                  content: "",
-                  toolName: cur.function.name,
-                  toolCallArgsChars: (cur.function.arguments ?? "").length,
-                  toolCallIndex: d.index,
-                  toolCallReadyCount: readyIndices.size,
-                };
-              }
-            }
-            if (chunk.usage) usage = chunk.usage;
-          }
-          toolCalls = [...callBuf.values()];
+            turn: this._turn,
+          });
+          assistantContent = result.assistantContent;
+          reasoningContent = result.reasoningContent;
+          toolCalls = result.toolCalls;
+          usage = result.usage;
         } else {
           const callModel = this.model;
           const resp = await this.client.chat({
@@ -880,7 +852,10 @@ export class CacheFirstLoop {
           this._steerQueue.length = 0;
           return;
         }
-        const probe = is5xxError(err) ? await probeDeepSeekReachable(this.client) : undefined;
+        const upstreamHost = this.client.baseUrl;
+        const dsHost = isDeepSeekHost(upstreamHost);
+        const probe =
+          is5xxError(err) && dsHost ? await probeDeepSeekReachable(this.client) : undefined;
         const cause = err instanceof Error ? err : new Error(String(err));
         const isClientError = /^DeepSeek (4\d{2}):/.test(cause.message);
         const retryable = !isClientError && cause.name !== "AbortError";
@@ -888,7 +863,7 @@ export class CacheFirstLoop {
           turn: this._turn,
           role: "error",
           content: "",
-          error: formatLoopError(err as Error, probe),
+          error: formatLoopError(err as Error, probe, { upstreamHost }),
           errorDetail: {
             name: cause.name,
             message: cause.message,
@@ -1049,105 +1024,16 @@ export class CacheFirstLoop {
         return;
       }
 
-      const dispatchSerial =
-        (process.env.REASONIX_TOOL_DISPATCH ?? "auto").toLowerCase() === "serial";
-      const parallelMaxParsed = Number.parseInt(process.env.REASONIX_PARALLEL_MAX ?? "", 10);
-      const parallelMax =
-        Number.isFinite(parallelMaxParsed) && parallelMaxParsed >= 1
-          ? Math.min(parallelMaxParsed, 16)
-          : 3;
-
-      let callIdx = 0;
-      while (callIdx < repairedCalls.length) {
-        // Group consecutive parallel-safe calls; an unsafe call breaks
-        // the chunk and runs alone (serial barrier).
-        const chunk: ToolCall[] = [];
-        if (!dispatchSerial) {
-          while (
-            callIdx < repairedCalls.length &&
-            chunk.length < parallelMax &&
-            this.tools.isParallelSafe(repairedCalls[callIdx]?.function?.name ?? "")
-          ) {
-            chunk.push(repairedCalls[callIdx++]!);
-          }
-        }
-        if (chunk.length === 0) {
-          chunk.push(repairedCalls[callIdx++]!);
-        }
-
-        // tool_start announces every call in the chunk BEFORE any
-        // dispatch awaits — TUI shows live indicators for each, and the
-        // gap between assistant_final and the first tool_result yield is
-        // never silent. Pre-add to the inflight set so the spinner is
-        // already correct on the very first card render — runOneToolCall's
-        // own add is then idempotent and its finally is the cleanup contract.
-        for (const call of chunk) {
-          const callId = this.inflightIdFor(call);
-          this._inflight.add(callId);
-          yield {
-            turn: this._turn,
-            role: "tool_start",
-            content: "",
-            toolName: call.function?.name ?? "",
-            toolArgs: call.function?.arguments ?? "{}",
-            callId,
-          };
-        }
-
-        // Race the chunk; collect outcomes in declared order so history
-        // append + tool yields are deterministic regardless of which
-        // call settles first.
-        const settled = await Promise.allSettled(chunk.map((c) => this.runOneToolCall(c, signal)));
-
-        for (let k = 0; k < chunk.length; k++) {
-          const call = chunk[k]!;
-          const name = call.function?.name ?? "";
-          const args = call.function?.arguments ?? "{}";
-          const s = settled[k]!;
-
-          let result: string;
-          let preWarnings: LoopEvent[] = [];
-          let postWarnings: LoopEvent[] = [];
-          if (s.status === "fulfilled") {
-            preWarnings = s.value.preWarnings;
-            postWarnings = s.value.postWarnings;
-            result = s.value.result;
-          } else {
-            const err = s.reason instanceof Error ? s.reason : new Error(String(s.reason));
-            result = JSON.stringify({ error: `${err.name}: ${err.message}` });
-          }
-
-          for (const w of preWarnings) yield w;
-          for (const w of postWarnings) yield w;
-
-          // Keep the structured result in history; the warning is only host-side visibility.
-          const rateLimited = parseRateLimitedToolResult(result);
-          if (rateLimited && !rateLimitWarningShown) {
-            rateLimitWarningShown = true;
-            yield {
-              turn: this._turn,
-              role: "warning",
-              content: rateLimited.message,
-            };
-          }
-
-          this.appendAndPersist({
-            role: "tool",
-            tool_call_id: call.id ?? "",
-            name,
-            content: result,
-          });
-
-          yield {
-            turn: this._turn,
-            role: "tool",
-            content: result,
-            toolName: name,
-            toolArgs: args,
-            callId: this.inflightIdFor(call),
-          };
-        }
-      }
+      yield* dispatchToolCallsChunked(repairedCalls, {
+        turn: this._turn,
+        signal,
+        isParallelSafe: (name) => this.tools.isParallelSafe(name),
+        inflightIdFor: (call) => this.inflightIdFor(call),
+        inflightAdd: (id) => this._inflight.add(id),
+        runOne: (call, sig) => this.runOneToolCall(call, sig),
+        appendAndPersist: (m) => this.appendAndPersist(m),
+        rateLimitState,
+      });
     }
     // Unreachable — the for-loop above is unbounded. The model exits the
     // loop via return statements when it produces no more tool calls,

@@ -237,6 +237,9 @@ button:disabled {
   background: var(--bg);
   transition: grid-template-columns 180ms ease;
 }
+.app[data-dragging="true"] {
+  transition: none;
+}
 
 html[data-platform="macos"] .app {
   overflow: hidden;
@@ -266,7 +269,7 @@ html[data-platform="macos"] .app {
   position: absolute;
   top: 36px;
   bottom: 26px;
-  width: 5px;
+  width: 4px;
   cursor: col-resize;
   z-index: 10;
   background: transparent;
@@ -274,13 +277,13 @@ html[data-platform="macos"] .app {
 }
 .resize-handle:hover,
 .resize-handle[data-dragging="true"] {
-  background: var(--accent);
+  background: transparent;
 }
 .resize-handle[data-side="left"] {
   left: calc(var(--side-width) - 2px);
 }
 .resize-handle[data-side="right"] {
-  right: calc(var(--ctx-width) - 2px);
+  right: calc(var(--ctx-width) - 4px);
 }
 
 /* ---------- TABBAR ---------- */
@@ -1439,6 +1442,259 @@ html[data-platform="macos"] .titlebar .tb-left {
   background: oklch(52% 0.22 25);
 }
 
+.session-import-popover {
+  position: fixed;
+  z-index: 80;
+  width: 320px;
+  max-width: min(320px, calc(100vw - 16px));
+  background: var(--card);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: var(--shadow-lg);
+  padding: 12px;
+  color: var(--fg);
+  animation: rise 0.16s ease-out;
+}
+.session-import-popover .head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.session-import-popover .head .close {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg-2);
+  border-radius: 6px;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.session-import-popover .head .close:hover {
+  background: var(--panel);
+  color: var(--fg);
+}
+.session-import-popover .import-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.session-import-popover .import-tabs button,
+.session-import-popover .import-detected-head button,
+.session-import-popover .import-app-row {
+  border: 1px solid var(--border-strong);
+  font-family: inherit;
+  cursor: pointer;
+}
+.session-import-popover .import-tabs button {
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--fg-2);
+  padding: 7px 8px;
+  font-size: 12px;
+}
+.session-import-popover .import-tabs button[data-on="true"] {
+  border-color: color-mix(in oklab, var(--accent) 55%, var(--border-strong));
+  background: color-mix(in oklab, var(--accent) 14%, var(--bg));
+  color: var(--fg);
+}
+.session-import-popover .import-detected-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 7px;
+  font-size: 11px;
+  color: var(--muted-2);
+}
+.session-import-popover .import-detected-head button {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.session-import-popover .import-app-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.session-import-popover .import-empty {
+  border: 1px dashed var(--border-strong);
+  border-radius: 8px;
+  padding: 10px;
+  color: var(--muted-2);
+  font-size: 12px;
+}
+.session-import-popover .import-app-row {
+  width: 100%;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--fg);
+  padding: 9px;
+  text-align: left;
+}
+.session-import-popover .import-app-row[data-disabled="true"] {
+  opacity: 0.55;
+  cursor: default;
+}
+.session-import-popover .app-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in oklab, var(--accent) 18%, var(--panel));
+  color: var(--fg);
+}
+.session-import-popover .app-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.session-import-popover .app-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+.session-import-popover .app-meta,
+.session-import-popover .hint {
+  font-size: 11px;
+  color: var(--muted-2);
+}
+.session-import-popover .hint {
+  margin: 9px 0 2px;
+}
+.session-import-popover .switch {
+  width: 34px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--border-strong);
+  position: relative;
+}
+.session-import-popover .switch::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: white;
+  transition: transform 0.14s ease;
+}
+.session-import-popover .switch[data-on="true"] {
+  background: var(--accent);
+}
+.session-import-popover .switch[data-on="true"]::after {
+  transform: translateX(14px);
+}
+.session-import-popover .field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.session-import-popover .label {
+  font-size: 11px;
+  color: var(--muted-2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.session-import-popover input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border-strong);
+  background: var(--bg);
+  color: var(--fg);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+}
+.session-import-popover input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent) 40%, transparent);
+}
+.session-import-popover .seg {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+.session-import-popover .seg button,
+.session-import-popover .path-row button,
+.session-import-popover .actions button {
+  border-radius: 8px;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.session-import-popover .seg button {
+  border: 1px solid var(--border-strong);
+  background: var(--bg);
+  color: var(--fg-2);
+  padding: 8px 10px;
+}
+.session-import-popover .seg button[data-on="true"] {
+  border-color: color-mix(in oklab, var(--accent) 55%, var(--border-strong));
+  background: color-mix(in oklab, var(--accent) 14%, var(--bg));
+  color: var(--fg);
+}
+.session-import-popover .path-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+}
+.session-import-popover .path-row button {
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--fg);
+  padding: 0 12px;
+}
+.session-import-popover .actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+.session-import-popover .actions button {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-strong);
+}
+.session-import-popover .actions button.cancel {
+  background: transparent;
+  color: var(--fg-2);
+}
+.session-import-popover .actions button.confirm {
+  background: var(--accent);
+  border-color: transparent;
+  color: white;
+}
+.session-import-popover .actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* Folder-delete confirm needs more room: workspace name + session count */
 .folder-menu { max-width: 260px; }
 .folder-menu .sm-confirm-desc {
@@ -1602,7 +1858,25 @@ html:not([data-platform="macos"]) .shortcut kbd[data-key="mod"] {
   flex: 1;
   overflow-y: auto;
   padding: 28px 0 40px;
+  margin-right: 5px;
   scroll-padding-bottom: 24px;
+}
+.thread::-webkit-scrollbar {
+  width: 8px;
+}
+.thread::-webkit-scrollbar-thumb {
+  background-clip: content-box;
+  border: 2px solid transparent;
+  background-color: var(--border);
+  border-radius: 999px;
+  transition: border-width 150ms, background-color 200ms;
+}
+.thread::-webkit-scrollbar-thumb:hover {
+  border-width: 0;
+  background-color: var(--border-strong);
+}
+.thread::-webkit-scrollbar-track {
+  background: transparent;
 }
 .thread-inner {
   max-width: var(--thread-max-width, 740px);
@@ -1611,6 +1885,78 @@ html:not([data-platform="macos"]) .shortcut kbd[data-key="mod"] {
   display: flex;
   flex-direction: column;
   gap: 28px;
+}
+.thread-inner > div[data-turn] {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 100px;
+}
+
+/* ---------- JUMP BAR (message navigation dock) ---------- */
+
+.jump-bar {
+  position: absolute;
+  right: 13px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0 12px;
+  z-index: 20;
+}
+.jump-scroll {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 0;
+  max-height: 240px;
+  overflow-y: auto;
+  scrollbar-width: none;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 16%, #000 84%, transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0%, #000 16%, #000 84%, transparent 100%);
+}
+.jump-scroll::-webkit-scrollbar {
+  display: none;
+}
+.jump-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  width: 32px;
+  min-height: 14px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.jump-dot {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--border-strong);
+  transition: background 200ms, width 400ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.jump-dot[data-d="0"] { background: var(--accent); }
+.jump-dot[data-d="1"] { background: color-mix(in srgb, var(--accent) 60%, transparent); }
+.jump-dot[data-d="2"] { background: color-mix(in srgb, var(--accent) 35%, transparent); }
+.jump-preview {
+  position: absolute;
+  right: 100%;
+  top: 0;
+  transform: translateY(-50%);
+  margin-right: 12px;
+  padding: 4px 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--fg);
+  white-space: nowrap;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: var(--shadow-sm);
+  z-index: 21;
+  pointer-events: none;
 }
 
 /* Jump-to-bottom button — shown when user has scrolled up during streaming */
@@ -2869,12 +3215,20 @@ html:not([data-platform="macos"]) .shortcut kbd[data-key="mod"] {
 }
 .mem-row {
   padding: 6px 8px;
+  width: 100%;
+  border: 0;
   border-radius: 6px;
   display: flex;
   gap: 8px;
   align-items: flex-start;
   background: var(--panel);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
   margin-bottom: 4px;
+}
+.mem-row[data-active="true"] {
+  background: var(--accent-soft);
 }
 .mem-row:last-child {
   margin-bottom: 0;
@@ -2892,6 +3246,20 @@ html:not([data-platform="macos"]) .shortcut kbd[data-key="mod"] {
 .mem-row .txt {
   font-size: 14px;
   color: var(--fg-2);
+  line-height: 1.5;
+}
+.mem-detail {
+  max-height: 220px;
+  overflow: auto;
+  margin: 8px 0 0;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  white-space: pre-wrap;
+  color: var(--fg-1);
+  font-family: var(--mono);
+  font-size: 12px;
   line-height: 1.5;
 }
 
@@ -2936,6 +3304,61 @@ html:not([data-platform="macos"]) .shortcut kbd[data-key="mod"] {
   margin-top: 8px;
   font-size: 14px;
   color: var(--fg-2);
+}
+
+.startup-failure {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: var(--bg);
+  color: var(--fg);
+}
+.startup-failure-panel {
+  width: min(620px, 100%);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+  box-shadow: var(--shadow-lg);
+  padding: 24px;
+}
+.startup-failure-kicker {
+  margin: 0 0 8px;
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.startup-failure h1 {
+  margin: 0;
+  font-size: 22px;
+  line-height: 1.2;
+}
+.startup-failure p {
+  color: var(--fg-2);
+}
+.startup-failure pre {
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  color: var(--danger);
+  padding: 12px;
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.startup-failure button {
+  margin-top: 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: oklch(99% 0 0);
+  padding: 8px 14px;
+  font: inherit;
 }
 
 /* part 4 — composer, status, context, menus */
@@ -3155,7 +3578,7 @@ html:not([data-platform="macos"]) .shortcut kbd[data-key="mod"] {
   position: absolute;
   bottom: calc(100% + 8px);
   left: 0;
-  width: 420px;
+  width: min(720px, calc(100vw - 32px));
   max-height: 320px;
   background: var(--card);
   border: 1px solid var(--border-strong);
@@ -3187,7 +3610,11 @@ html:not([data-platform="macos"]) .shortcut kbd[data-key="mod"] {
 }
 .popup-list {
   overflow-y: auto;
+  overflow-x: auto;
   padding: 4px;
+}
+.at-popup-list .popup-item {
+  min-width: max-content;
 }
 .popup-item {
   display: grid;
@@ -3306,8 +3733,20 @@ html:not([data-platform="macos"]) .cmdk-row .kb .shortcut kbd[data-key="mod"] {
 
 .ctx-body {
   flex: 1;
+  margin-right: 12px;
   overflow-y: auto;
   padding: 12px;
+  padding-right: 20px;
+}
+.ctx-body::-webkit-scrollbar {
+  width: 8px;
+}
+.ctx-body::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 999px;
+}
+.ctx-body::-webkit-scrollbar-thumb:hover {
+  background: var(--border-strong);
 }
 
 .ctx-block {
@@ -4683,6 +5122,18 @@ html:not([data-platform="macos"]) .cmdk-row .kb .shortcut kbd[data-key="mod"] {
   margin-top: 2px;
 }
 .scard .grow { flex: 1; }
+.scard .mcp-spec-body {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.scard .mcp-spec-summary {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.scard .mcp-remove {
+  flex: 0 0 auto;
+}
 .scard .desc {
   font-size: 14px;
   color: var(--fg-2);
@@ -4990,6 +5441,24 @@ html:not([data-platform="macos"]) .cmdk-row .kb .shortcut kbd[data-key="mod"] {
 }
 .plan-banner button:hover {
   background: oklch(100% 0 0 / 0.1);
+}
+
+.update-overlay {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  pointer-events: none;
+  animation: rise 0.18s ease-out;
+}
+.update-overlay-card {
+  pointer-events: auto;
+  background: var(--card);
+  border-color: var(--accent);
+  box-shadow: var(--shadow-lg);
+  min-width: 360px;
+  max-width: min(560px, calc(100vw - 32px));
 }
 
 /* ============================================================
@@ -5851,6 +6320,9 @@ html:not([data-platform="macos"]) .cmdk-row .kb .shortcut kbd[data-key="mod"] {
 .ms-seg:hover { color: var(--fg); }
 .ms-seg[data-on="true"][data-k="review"] {
   background: var(--tone-info-soft); color: var(--tone-info);
+}
+.ms-seg[data-on="true"][data-k="plan"] {
+  background: var(--tone-warn-soft); color: var(--tone-warn);
 }
 .ms-seg[data-on="true"][data-k="auto"] {
   background: var(--accent-soft); color: var(--accent);
@@ -6778,3 +7250,79 @@ html[data-platform="macos"] .splash {
   background: var(--panel);
   color: var(--muted);
 }
+.muted-card {
+  padding: 16px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.memory-browser {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.9fr) minmax(280px, 1.1fr);
+  gap: 12px;
+  min-height: 320px;
+}
+
+.memory-list,
+.memory-detail {
+  min-width: 0;
+  max-height: 52vh;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+}
+
+.memory-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.memory-item {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.memory-item[data-active="true"] {
+  background: var(--accent-soft);
+}
+
+.memory-kind,
+.memory-path {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.memory-name {
+  font-size: 12px;
+  color: var(--text);
+}
+
+.memory-detail {
+  margin: 0;
+  padding: 12px;
+  white-space: pre-wrap;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+@media (max-width: 860px) {
+  .memory-browser {
+    grid-template-columns: 1fr;
+  }
+}
+

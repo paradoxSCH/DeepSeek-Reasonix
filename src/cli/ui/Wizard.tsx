@@ -2,7 +2,7 @@
 
 import { mkdirSync, statSync } from "node:fs";
 import { Box, Text, useApp, useInput } from "ink";
-import TextInput from "ink-text-input";
+import { TextInput } from "ink";
 // biome-ignore lint/style/useImportType: JSX (jsx: "react") needs React as a value at runtime
 import React, { useEffect, useState } from "react";
 import {
@@ -68,6 +68,8 @@ const CATALOG_BY_NAME = new Map(MCP_CATALOG.map((e) => [e.name, e]));
 const LANGUAGE_LABELS: Record<LanguageCode, string> = {
   EN: "English",
   "zh-CN": "简体中文",
+  de: "Deutsch",
+  ru: "Русский",
 };
 
 export function Wizard({

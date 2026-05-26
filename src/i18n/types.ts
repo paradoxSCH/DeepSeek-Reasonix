@@ -1,4 +1,4 @@
-export type LanguageCode = "EN" | "zh-CN";
+export type LanguageCode = "EN" | "zh-CN" | "de" | "ru";
 
 export interface TranslationSchema {
   common: {
@@ -314,6 +314,8 @@ export interface TranslationSchema {
     deepseek5xxUnreachable: string;
     deepseek5xxActionNetwork: string;
     deepseek5xxActionRetry: string;
+    upstream5xxHead: string;
+    upstream5xxActionRetry: string;
     innerNoMessage: string;
     reasonAborted: string;
     reasonContextGuard: string;

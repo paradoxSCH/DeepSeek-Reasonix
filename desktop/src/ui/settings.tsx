@@ -1,8 +1,15 @@
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { type ReactNode, useEffect, useState } from "react";
 import type { Balance, Settings as SettingsType, UsageStats } from "../App";
-import { setLang, t, useLang } from "../i18n";
+import { getLangLabel, getSupportedLangs, setLang, t, useLang } from "../i18n";
 import { I } from "../icons";
-import type { McpSpecInfo, SettingsPatch, SkillInfo } from "../protocol";
+import type {
+  McpSpecInfo,
+  MemoryDetail,
+  MemoryEntryInfo,
+  SettingsPatch,
+  SkillInfo,
+} from "../protocol";
 import {
   describeQQRowSummary,
   getQQConnectIntent,
@@ -62,6 +69,8 @@ export function SettingsModal({
   mcpSpecs,
   mcpBridged,
   skills,
+  memory,
+  memoryDetail,
   qq,
   onClose,
   onSave,
@@ -74,6 +83,7 @@ export function SettingsModal({
   onPickWorkspace,
   onAddMcpSpec,
   onRemoveMcpSpec,
+  onReadMemory,
 }: {
   settings: SettingsType;
   balance: Balance | null;
@@ -93,6 +103,8 @@ export function SettingsModal({
   mcpSpecs: McpSpecInfo[];
   mcpBridged: boolean;
   skills: SkillInfo[];
+  memory: MemoryEntryInfo[];
+  memoryDetail: MemoryDetail | null;
   qq: QQDesktopSettingsState | null;
   onClose: () => void;
   onSave: (patch: SettingsPatch) => void;
@@ -105,6 +117,7 @@ export function SettingsModal({
   onPickWorkspace: () => void;
   onAddMcpSpec: (spec: string) => void;
   onRemoveMcpSpec: (spec: string) => void;
+  onReadMemory: (path: string) => void;
 }) {
   const [page, setPage] = useState<PageId>(initialPage ?? "general");
   const [qqConfigureOpen, setQQConfigureOpen] = useState(false);
@@ -189,7 +202,9 @@ export function SettingsModal({
                 onSave={onSave}
               />
             )}
-            {page === "memory" && <PageMemory />}
+            {page === "memory" && (
+              <PageMemory entries={memory} detail={memoryDetail} onRead={onReadMemory} />
+            )}
             {page === "rules" && <PageRules settings={settings} onSave={onSave} />}
             {page === "billing" && (
               <PageBilling balance={balance} usage={usage} currency={currency} />
@@ -591,16 +606,11 @@ function PageGeneral({
             <div className="h">{t("settings.languageHint")}</div>
           </div>
           <div className="seg-ctrl">
-            <button
-              type="button"
-              data-on={lang === "zh-CN"}
-              onClick={() => setLang("zh-CN")}
-            >
-              {t("settings.langZhCn")}
-            </button>
-            <button type="button" data-on={lang === "en"} onClick={() => setLang("en")}>
-              {t("settings.langEn")}
-            </button>
+            {getSupportedLangs().map((code) => (
+              <button type="button" key={code} data-on={lang === code} onClick={() => setLang(code)}>
+                {getLangLabel(code)}
+              </button>
+            ))}
           </div>
         </div>
       </section>
@@ -657,7 +667,7 @@ function PageGeneral({
             <div className="h">{t("settings.editModeHint")}</div>
           </div>
           <div className="seg-ctrl">
-            {(["review", "auto", "yolo"] as const).map((m) => (
+            {(["plan", "review", "auto", "yolo"] as const).map((m) => (
               <button
                 type="button"
                 key={m}
@@ -723,7 +733,8 @@ function PageGeneral({
                   | "metaso"
                   | "tavily"
                   | "perplexity"
-                  | "exa",
+                  | "exa"
+                  | "ollama",
               })
             }
           >
@@ -733,10 +744,155 @@ function PageGeneral({
             <option value="tavily">{t("settings.webSearchEngineTavily")}</option>
             <option value="perplexity">{t("settings.webSearchEnginePerplexity")}</option>
             <option value="exa">{t("settings.webSearchEngineExa")}</option>
+            <option value="ollama">{t("settings.webSearchEngineOllama")}</option>
           </select>
         </div>
+        <WebSearchEngineCredentials settings={settings} onSave={onSave} />
       </section>
     </>
+  );
+}
+
+const SEARCH_ENGINE_API_KEY_FIELDS: ReadonlyArray<{
+  engine: "metaso" | "tavily" | "perplexity" | "exa" | "ollama";
+  patchKey: "metasoApiKey" | "tavilyApiKey" | "perplexityApiKey" | "exaApiKey" | "ollamaApiKey";
+  signupUrl: string;
+}> = [
+  { engine: "metaso", patchKey: "metasoApiKey", signupUrl: "https://metaso.cn/settings/api" },
+  { engine: "tavily", patchKey: "tavilyApiKey", signupUrl: "https://app.tavily.com" },
+  {
+    engine: "perplexity",
+    patchKey: "perplexityApiKey",
+    signupUrl: "https://www.perplexity.ai/settings/api",
+  },
+  { engine: "exa", patchKey: "exaApiKey", signupUrl: "https://dashboard.exa.ai/api-keys" },
+  { engine: "ollama", patchKey: "ollamaApiKey", signupUrl: "https://ollama.com/settings/keys" },
+];
+
+function WebSearchEngineCredentials({
+  settings,
+  onSave,
+}: {
+  settings: SettingsType;
+  onSave: (patch: SettingsPatch) => void;
+}) {
+  const engine = settings.webSearchEngine ?? "bing";
+  if (engine === "bing") return null;
+  if (engine === "searxng") {
+    return <SearxngEndpointRow settings={settings} onSave={onSave} />;
+  }
+  const field = SEARCH_ENGINE_API_KEY_FIELDS.find((f) => f.engine === engine);
+  if (!field) return null;
+  const prefix = settings.webSearchApiKeys?.[engine];
+  return (
+    <WebSearchApiKeyRow
+      engine={engine}
+      patchKey={field.patchKey}
+      signupUrl={field.signupUrl}
+      prefix={prefix}
+      onSave={onSave}
+    />
+  );
+}
+
+function SearxngEndpointRow({
+  settings,
+  onSave,
+}: {
+  settings: SettingsType;
+  onSave: (patch: SettingsPatch) => void;
+}) {
+  const [draft, setDraft] = useState(settings.webSearchEndpoint ?? "");
+  useEffect(() => {
+    setDraft(settings.webSearchEndpoint ?? "");
+  }, [settings.webSearchEndpoint]);
+  return (
+    <div className="setting-row">
+      <div className="l">
+        <div className="n">{t("settings.webSearchEndpoint")}</div>
+        <div className="h">{t("settings.webSearchEndpointHint")}</div>
+      </div>
+      <input
+        className="field mono"
+        value={draft}
+        placeholder="http://localhost:8080"
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => {
+          const next = draft.trim();
+          if (next === (settings.webSearchEndpoint ?? "")) return;
+          onSave({ webSearchEndpoint: next || null });
+        }}
+      />
+    </div>
+  );
+}
+
+function WebSearchApiKeyRow({
+  engine,
+  patchKey,
+  signupUrl,
+  prefix,
+  onSave,
+}: {
+  engine: "metaso" | "tavily" | "perplexity" | "exa" | "ollama";
+  patchKey: "metasoApiKey" | "tavilyApiKey" | "perplexityApiKey" | "exaApiKey" | "ollamaApiKey";
+  signupUrl: string;
+  prefix?: string;
+  onSave: (patch: SettingsPatch) => void;
+}) {
+  const [draft, setDraft] = useState("");
+  const label = t(`settings.webSearchApiKey.${engine}` as const);
+  return (
+    <div className="setting-row">
+      <div className="l">
+        <div className="n">{label}</div>
+        <div className="h">
+          {prefix ? t("settings.apiKeySet", { prefix }) : t("settings.apiKeyNotSet")}{" "}
+          <a
+            href={signupUrl}
+            target="_blank"
+            rel="noreferrer"
+            onClick={(e) => {
+              e.preventDefault();
+              void openUrl(signupUrl).catch(() => undefined);
+            }}
+          >
+            {t("settings.webSearchApiKeySignup")}
+          </a>
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 6 }}>
+        <input
+          className="field mono"
+          type="password"
+          value={draft}
+          placeholder={prefix ?? ""}
+          onChange={(e) => setDraft(e.target.value)}
+        />
+        <button
+          type="button"
+          className="btn primary"
+          disabled={!draft.trim()}
+          onClick={() => {
+            const trimmed = draft.trim();
+            if (!trimmed) return;
+            onSave({ [patchKey]: trimmed } as SettingsPatch);
+            setDraft("");
+          }}
+        >
+          {t("settings.apiKeySave")}
+        </button>
+        {prefix ? (
+          <button
+            type="button"
+            className="btn"
+            onClick={() => onSave({ [patchKey]: null } as SettingsPatch)}
+          >
+            {t("settings.webSearchApiKeyClear")}
+          </button>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
@@ -940,14 +1096,15 @@ function PageMCP({
                 <span className="ico">
                   <I.wrench size={14} />
                 </span>
-                <div>
+                <div className="mcp-spec-body">
                   <div className="nm">{s.name ?? "(anonymous)"}</div>
-                  <div className="sub">{s.summary}</div>
+                  <div className="sub mcp-spec-summary" title={s.summary}>
+                    {s.summary}
+                  </div>
                 </div>
-                <span className="grow" />
                 <button
                   type="button"
-                  className="btn ghost"
+                  className="btn ghost mcp-remove"
                   style={{ color: "var(--danger)" }}
                   onClick={() => onRemove(s.raw)}
                 >
@@ -1074,22 +1231,42 @@ function PageSkills({
   );
 }
 
-function PageMemory() {
+function PageMemory({
+  entries,
+  detail,
+  onRead,
+}: {
+  entries: MemoryEntryInfo[];
+  detail: MemoryDetail | null;
+  onRead: (path: string) => void;
+}) {
   return (
     <section className="section">
       <div className="stitle">{t("settings.memorySection")}</div>
-      <div
-        style={{
-          padding: 16,
-          background: "var(--card)",
-          border: "1px solid var(--border)",
-          borderRadius: 10,
-          fontSize: 12,
-          color: "var(--muted)",
-        }}
-      >
-        {t("settings.memoryDesc")}
-      </div>
+      {entries.length === 0 ? (
+        <div className="muted-card">{t("settings.memoryDesc")}</div>
+      ) : (
+        <div className="memory-browser">
+          <div className="memory-list">
+            {entries.map((m) => (
+              <button
+                type="button"
+                className="memory-item"
+                data-active={detail?.path === m.path}
+                key={m.path}
+                onClick={() => onRead(m.path)}
+              >
+                <span className="memory-kind">{m.kind.replace("_", " ")}</span>
+                <span className="memory-name">{m.description || m.name}</span>
+                <span className="memory-path">{m.path}</span>
+              </button>
+            ))}
+          </div>
+          <pre className="memory-detail">
+            {detail ? detail.body : t("settings.memoryDesc")}
+          </pre>
+        </div>
+      )}
     </section>
   );
 }
@@ -1111,7 +1288,7 @@ function PageRules({
             <div className="h">{t("settings.editModeHint")}</div>
           </div>
           <div className="seg-ctrl">
-            {(["review", "auto", "yolo"] as const).map((m) => (
+            {(["plan", "review", "auto", "yolo"] as const).map((m) => (
               <button
                 type="button"
                 key={m}

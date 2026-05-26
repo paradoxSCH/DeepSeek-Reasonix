@@ -237,6 +237,7 @@ export const en = {
     webSearchEngineTavily: "tavily — 1000/mo free (set TAVILY_API_KEY)",
     webSearchEnginePerplexity: "perplexity — AI-native (set PERPLEXITY_API_KEY)",
     webSearchEngineExa: "exa — AI-native 1000/mo free (set EXA_API_KEY)",
+    webSearchEngineOllama: "ollama — Ollama cloud web search (set OLLAMA_API_KEY)",
     webSearchEngineNote: "applies to the next web_search call",
     sectionBudget: "Budget",
     budget: "Budget",
@@ -1310,6 +1311,8 @@ export const en = {
     maxDesc: "DeepSeek extension; rejected by stock OpenAI / vLLM",
   },
   editMode: {
+    plan: "Plan",
+    planHint: "read-only · all write tools refuse to dispatch",
     review: "Review",
     reviewHint: "both edits and non-allowlisted shell ask first",
     auto: "Auto",

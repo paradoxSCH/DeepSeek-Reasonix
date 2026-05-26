@@ -102,14 +102,25 @@ function tryEscapelessCsi(chunk: string, i: number): { advance: number; ev: KeyE
   for (const entry of CSI_TAIL_MAP) {
     const candidate = `[${entry.tail}`;
     if (chunk.slice(i, i + candidate.length) === candidate) {
+      // Don't grab `[D` out of typed/pasted `[DEBUG]` — issue #1771.
+      const after = chunk[i + candidate.length];
+      if (after !== undefined && !isCsiContinuationByte(after)) return null;
       return { advance: candidate.length, ev: entry.ev };
     }
   }
   return null;
 }
 
+function isCsiContinuationByte(ch: string): boolean {
+  if (ch === "[" || ch === "\x1b") return true;
+  const code = ch.charCodeAt(0);
+  return code < 0x20 || code === 0x7f;
+}
+
 /** `[<btn;col;row[Mm]` — SGR mouse report body (without leading ESC). */
 const SGR_MOUSE_ESCAPELESS_RE = /^\[<\d+;\d+;\d+[Mm]/;
+const LEGACY_MOUSE_ESCAPELESS_PREFIX = "[M";
+const LEGACY_MOUSE_ESCAPELESS_LEN = LEGACY_MOUSE_ESCAPELESS_PREFIX.length + 3;
 
 function decodeSgrMouseBody(body: string): KeyEvent | null {
   const m = /^<(\d+);(\d+);(\d+)([Mm])$/.exec(body);
@@ -137,6 +148,16 @@ function tryEscapelessSgrMouse(
   if (!m) return null;
   const body = m[0].slice(1);
   return { advance: m[0].length, ev: decodeSgrMouseBody(body) };
+}
+
+function tryEscapelessLegacyMouse(chunk: string, i: number): { advance: number } | null {
+  if (
+    chunk.slice(i, i + LEGACY_MOUSE_ESCAPELESS_PREFIX.length) !== LEGACY_MOUSE_ESCAPELESS_PREFIX
+  ) {
+    return null;
+  }
+  if (chunk.length - i < LEGACY_MOUSE_ESCAPELESS_LEN) return null;
+  return { advance: LEGACY_MOUSE_ESCAPELESS_LEN };
 }
 
 function isCsiFinal(ch: string): boolean {
@@ -470,6 +491,11 @@ export class StdinReader {
         i += mouseEscapeless.advance;
         continue;
       }
+      const legacyMouseEscapeless = tryEscapelessLegacyMouse(chunk, i);
+      if (legacyMouseEscapeless) {
+        i += legacyMouseEscapeless.advance;
+        continue;
+      }
 
       // Single-byte control keys.
       // \r (CR, 0x0D) is Enter on every terminal in raw mode.
@@ -528,7 +554,14 @@ export class StdinReader {
         if (cc >= 1 && cc <= 26) break;
         // Don't swallow into a printable run if a CSI / paste prefix
         // starts at this position.
-        if (c === "[" && (tryEscapelessCsi(chunk, end) || tryEscapelessSgrMouse(chunk, end))) break;
+        if (
+          c === "[" &&
+          (tryEscapelessCsi(chunk, end) ||
+            tryEscapelessSgrMouse(chunk, end) ||
+            tryEscapelessLegacyMouse(chunk, end))
+        ) {
+          break;
+        }
         if (chunk.slice(end, end + PASTE_START_BARE.length) === PASTE_START_BARE) break;
         end++;
       }
