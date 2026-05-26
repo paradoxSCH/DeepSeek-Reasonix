@@ -2236,4 +2236,40 @@ describe("CacheFirstLoop — mid-turn steer injection", () => {
     loop.steer("second steer");
     expect(loop.steerConsumed).toBe(false);
   });
+
+  it("surfaces structured errorDetail when the API call fails", async () => {
+    const err = Object.assign(new Error("SSE body read failed: terminated"), {
+      phase: "stream_body_read",
+      code: "UND_ERR_ABORTED",
+    });
+    const fetch = vi.fn(async () => {
+      throw err;
+    }) as unknown as typeof fetch;
+    const client = new DeepSeekClient({
+      apiKey: "sk-test",
+      fetch,
+    });
+    const loop = new CacheFirstLoop({
+      client,
+      prefix: new ImmutablePrefix({ system: "be brief" }),
+      stream: false,
+    });
+
+    const events: any[] = [];
+    for await (const ev of loop.step("hello")) {
+      events.push(ev);
+    }
+
+    const errorEv = events.find((e) => e.role === "error");
+    expect(errorEv).toBeDefined();
+    expect(errorEv!.error).toContain("terminated");
+    expect(errorEv!.errorDetail).toMatchObject({
+      name: "Error",
+      message: expect.stringContaining("terminated"),
+      phase: "stream_body_read",
+      code: "UND_ERR_ABORTED",
+      retryable: true,
+      recoverable: true,
+    });
+  });
 });

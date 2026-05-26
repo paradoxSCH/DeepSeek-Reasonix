@@ -217,6 +217,9 @@ export interface ErrorEvent extends EventBase {
   type: "error";
   message: string;
   recoverable: boolean;
+  code?: string;
+  phase?: string;
+  retryable?: boolean;
 }
 
 /** Non-fatal system event surfaced to UIs as a quiet inline divider — compaction,

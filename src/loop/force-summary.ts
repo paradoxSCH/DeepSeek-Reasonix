@@ -65,11 +65,18 @@ export async function* forceSummaryAfterIterLimit(
     yield { turn: ctx.turn, role: "done", content: summary };
   } catch (err) {
     const label = errorLabelFor(opts.reason);
+    const message = t("summary.failedAfterReason", { label, message: (err as Error).message });
     yield {
       turn: ctx.turn,
       role: "error",
       content: "",
-      error: t("summary.failedAfterReason", { label, message: (err as Error).message }),
+      error: message,
+      errorDetail: {
+        name: "ForceSummaryFailed",
+        message,
+        retryable: true,
+        recoverable: true,
+      },
     };
     yield { turn: ctx.turn, role: "done", content: "" };
   }

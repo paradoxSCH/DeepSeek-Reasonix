@@ -315,13 +315,22 @@ export async function acpCommand(opts: AcpOptions): Promise<void> {
         update: {
           sessionUpdate: "agent_message_chunk",
           content: { type: "text", text: `\n\n[error] ${message}` },
+          metadata: {
+            error: {
+              name: (err as Error).name || "Error",
+              message,
+              code: (err as any).code,
+              phase: (err as any).phase,
+              retryable: false,
+            },
+          },
         },
       } satisfies SessionUpdateParams);
       stopReason = "error";
     } finally {
       session.aborter = null;
     }
-    return { stopReason };
+    return { stopReason, transcriptPath: opts.transcript || null };
   });
 
   server.onNotification<SessionCancelParams>("session/cancel", (params) => {

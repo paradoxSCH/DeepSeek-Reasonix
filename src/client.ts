@@ -352,7 +352,17 @@ export class DeepSeekClient {
           continue;
         }
         if (done) break;
-        const { value, done: streamDone } = await reader.read();
+        let value: Uint8Array | undefined;
+        let streamDone: boolean;
+        try {
+          ({ value, done: streamDone } = await reader.read());
+        } catch (readErr) {
+          const cause = readErr instanceof Error ? readErr : new Error(String(readErr));
+          throw Object.assign(new Error(`SSE body read failed: ${cause.message}`), {
+            phase: "stream_body_read" as const,
+            code: (cause as any).code,
+          });
+        }
         if (streamDone) break;
         parser.feed(decoder.decode(value, { stream: true }));
       }

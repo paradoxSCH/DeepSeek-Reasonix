@@ -588,14 +588,21 @@ export class CacheFirstLoop {
     if (this.budgetUsd !== null) {
       const spent = this.stats.totalCost;
       if (spent >= this.budgetUsd) {
+        const message = t("loop.budgetExhausted", {
+          spent: spent.toFixed(4),
+          cap: this.budgetUsd.toFixed(2),
+        });
         yield {
           turn: this._turn,
           role: "error",
           content: "",
-          error: t("loop.budgetExhausted", {
-            spent: spent.toFixed(4),
-            cap: this.budgetUsd.toFixed(2),
-          }),
+          error: message,
+          errorDetail: {
+            name: "BudgetExhausted",
+            message,
+            retryable: false,
+            recoverable: false,
+          },
         };
         this._steerQueue.length = 0;
         return;
@@ -874,11 +881,22 @@ export class CacheFirstLoop {
           return;
         }
         const probe = is5xxError(err) ? await probeDeepSeekReachable(this.client) : undefined;
+        const cause = err instanceof Error ? err : new Error(String(err));
+        const isClientError = /^DeepSeek (4\d{2}):/.test(cause.message);
+        const retryable = !isClientError && cause.name !== "AbortError";
         yield {
           turn: this._turn,
           role: "error",
           content: "",
           error: formatLoopError(err as Error, probe),
+          errorDetail: {
+            name: cause.name,
+            message: cause.message,
+            phase: (cause as any).phase,
+            code: (cause as any).code,
+            retryable,
+            recoverable: retryable,
+          },
         };
         this._steerQueue.length = 0;
         return;
