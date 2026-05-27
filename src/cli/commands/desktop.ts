@@ -40,6 +40,7 @@ import {
   loadSubagentModels,
   loadTavilyApiKey,
   loadWorkspaceDir,
+  normalizeMcpConfig,
   pushRecentWorkspace,
   readConfig,
   webSearchEngine as readWebSearchEngine,
@@ -89,7 +90,7 @@ import {
 } from "../../desktop/qq-turn-routing.js";
 import { loadDotenv } from "../../env.js";
 import { CacheFirstLoop, DeepSeekClient, ImmutablePrefix } from "../../index.js";
-import { parseMcpSpec } from "../../mcp/spec.js";
+import { parseMcpSpec, specToRaw } from "../../mcp/spec.js";
 import {
   deleteSession,
   listSessionsForWorkspace,
@@ -534,6 +535,11 @@ export function normalizeSessionTitle(raw: string): string {
   return raw.replace(/\s+/g, " ").trim().slice(0, SESSION_TITLE_MAX_CHARS);
 }
 
+/** Return all MCP specs as raw strings, reading both legacy `cfg.mcp` and canonical `cfg.mcpServers`. */
+export function getAllMcpSpecs(cfg: ReturnType<typeof readConfig>): string[] {
+  return normalizeMcpConfig(cfg).map(specToRaw);
+}
+
 /** Drain `buffer` to `fd` across partial writes; retry EAGAIN after a 5 ms park. Exported for tests. */
 export function writeAllSync(
   fd: number,
@@ -837,7 +843,8 @@ function summarizeMcpSpec(raw: string): McpSpecInfo {
 
 function emitMcpSpecs(tab: Tab): void {
   const cfg = readConfig();
-  const specs = (cfg.mcp ?? []).map((raw) => {
+  const allSpecs = getAllMcpSpecs(cfg);
+  const specs = allSpecs.map((raw) => {
     const base = summarizeMcpSpec(raw);
     const live = tab.mcpStatuses.get(raw);
     if (!live) return base;
@@ -1451,7 +1458,8 @@ export async function desktopCommand(opts: DesktopOptions): Promise<void> {
           emit({ type: "$error", message: `mcp reload failed: ${(err as Error).message}` }, tab.id);
         });
     }
-    const requested = (readConfig().mcp ?? []).length;
+    const allSpecs = getAllMcpSpecs(readConfig());
+    const requested = allSpecs.length;
     if (requested === 0) return Promise.resolve();
     const runtime = createMcpRuntime({
       getTools: () => {
@@ -1466,8 +1474,8 @@ export async function desktopCommand(opts: DesktopOptions): Promise<void> {
     tab.mcpRuntime = runtime;
     runtime.setLifecycleSink((notice) => {
       if (notice.kind === "slow") return; // not surfaced in the desktop panel
-      const cfg = readConfig().mcp ?? [];
-      const target = cfg.find((raw) => {
+      const specs = getAllMcpSpecs(readConfig());
+      const target = specs.find((raw) => {
         try {
           return parseMcpSpec(raw).name === notice.name;
         } catch {
