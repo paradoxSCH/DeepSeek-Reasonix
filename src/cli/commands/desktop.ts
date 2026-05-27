@@ -23,7 +23,6 @@ import {
   isPlausibleKey,
   isReasoningEffort,
   loadApiKey,
-  loadBraveApiKey,
   loadDesktopOpenTabs,
   loadEditMode,
   loadEditor,
@@ -41,6 +40,7 @@ import {
   loadSubagentModels,
   loadTavilyApiKey,
   loadWorkspaceDir,
+  normalizeMcpConfig,
   pushRecentWorkspace,
   readConfig,
   webSearchEngine as readWebSearchEngine,
@@ -89,14 +89,8 @@ import {
   takeQQPendingInteraction,
 } from "../../desktop/qq-turn-routing.js";
 import { loadDotenv } from "../../env.js";
-import { type ResolvedHook, formatHookOutcomeMessage, loadHooks, runHooks } from "../../hooks.js";
-import {
-  CacheFirstLoop,
-  DeepSeekClient,
-  ImmutablePrefix,
-  type LoopAbortOptions,
-} from "../../index.js";
-import { parseMcpSpec } from "../../mcp/spec.js";
+import { CacheFirstLoop, DeepSeekClient, ImmutablePrefix } from "../../index.js";
+import { parseMcpSpec, specToRaw } from "../../mcp/spec.js";
 import {
   deleteSession,
   listSessionsForWorkspace,
@@ -128,11 +122,6 @@ export interface DesktopOptions {
   dir?: string;
 }
 
-export function desktopUserAbortLoopOptions(): LoopAbortOptions | undefined {
-  // User-facing Abort stops generation; it must not erase a prompt that remains visible in chat.
-  return undefined;
-}
-
 type InMessage = { tabId?: string } & (
   | { cmd: "user_input"; text: string }
   | { cmd: "abort" }
@@ -161,22 +150,13 @@ type InMessage = { tabId?: string } & (
       workspaceDir?: string;
       model?: string;
       editor?: string;
-      webSearchEngine?:
-        | "bing"
-        | "searxng"
-        | "metaso"
-        | "tavily"
-        | "perplexity"
-        | "exa"
-        | "brave"
-        | "ollama";
+      webSearchEngine?: "bing" | "searxng" | "metaso" | "tavily" | "perplexity" | "exa" | "ollama";
       webSearchEndpoint?: string | null;
       metasoApiKey?: string | null;
       tavilyApiKey?: string | null;
       perplexityApiKey?: string | null;
       exaApiKey?: string | null;
       ollamaApiKey?: string | null;
-      braveApiKey?: string | null;
       subagentModels?: Record<string, "flash" | "pro">;
       showSystemEvents?: boolean;
     }
@@ -225,15 +205,7 @@ interface SettingsEvent {
   recentWorkspaces: string[];
   model: string;
   editor?: string;
-  webSearchEngine?:
-    | "bing"
-    | "searxng"
-    | "metaso"
-    | "tavily"
-    | "perplexity"
-    | "exa"
-    | "brave"
-    | "ollama";
+  webSearchEngine?: "bing" | "searxng" | "metaso" | "tavily" | "perplexity" | "exa" | "ollama";
   webSearchEndpoint?: string;
   webSearchApiKeys?: {
     metaso?: string;
@@ -260,19 +232,11 @@ interface QQSettingsEvent {
   access: string;
 }
 
-interface BalanceInfoItem {
-  currency: string;
-  total: number;
-  granted?: number;
-  toppedUp?: number;
-}
-
 interface BalanceEvent {
   type: "$balance";
   currency: string;
   total: number;
   isAvailable: boolean;
-  balanceInfos: BalanceInfoItem[];
 }
 
 interface PlanRequiredEvent {
@@ -571,6 +535,11 @@ export function normalizeSessionTitle(raw: string): string {
   return raw.replace(/\s+/g, " ").trim().slice(0, SESSION_TITLE_MAX_CHARS);
 }
 
+/** Return all MCP specs as raw strings, reading both legacy `cfg.mcp` and canonical `cfg.mcpServers`. */
+export function getAllMcpSpecs(cfg: ReturnType<typeof readConfig>): string[] {
+  return normalizeMcpConfig(cfg).map(specToRaw);
+}
+
 /** Drain `buffer` to `fd` across partial writes; retry EAGAIN after a 5 ms park. Exported for tests. */
 export function writeAllSync(
   fd: number,
@@ -706,7 +675,6 @@ function collectWebSearchApiKeyPrefixes(): {
   perplexity?: string;
   exa?: string;
   ollama?: string;
-  brave?: string;
 } {
   return {
     metaso: maskApiKey(loadMetasoApiKey()),
@@ -714,7 +682,6 @@ function collectWebSearchApiKeyPrefixes(): {
     perplexity: maskApiKey(loadPerplexityApiKey()),
     exa: maskApiKey(loadExaApiKey()),
     ollama: maskApiKey(loadOllamaApiKey()),
-    brave: maskApiKey(loadBraveApiKey()),
   };
 }
 
@@ -765,19 +732,12 @@ async function emitBalance(tab: Tab): Promise<void> {
   if (!bal) return;
   const primary = pickPrimaryBalance(bal.balance_infos);
   if (!primary) return;
-  const balanceInfos = bal.balance_infos.map((info) => ({
-    currency: info.currency,
-    total: Number(info.total_balance),
-    granted: info.granted_balance ? Number(info.granted_balance) : undefined,
-    toppedUp: info.topped_up_balance ? Number(info.topped_up_balance) : undefined,
-  }));
   emit(
     {
       type: "$balance",
       currency: primary.currency,
       total: Number(primary.total_balance),
       isAvailable: bal.is_available,
-      balanceInfos,
     },
     tab.id,
   );
@@ -845,7 +805,6 @@ function loadSessionIntoTab(
     },
     tab.id,
   );
-  emitCtxBreakdown(tab);
   if (backfilledWorkspace) emitSessions(tab);
 }
 
@@ -884,7 +843,8 @@ function summarizeMcpSpec(raw: string): McpSpecInfo {
 
 function emitMcpSpecs(tab: Tab): void {
   const cfg = readConfig();
-  const specs = (cfg.mcp ?? []).map((raw) => {
+  const allSpecs = getAllMcpSpecs(cfg);
+  const specs = allSpecs.map((raw) => {
     const base = summarizeMcpSpec(raw);
     const live = tab.mcpStatuses.get(raw);
     if (!live) return base;
@@ -903,33 +863,19 @@ function emitMemory(tab: Tab): void {
   }
 }
 
-function countTokensForMeter(text: string): number {
-  try {
-    return countTokensBounded(text);
-  } catch {
-    return text.length === 0 ? 0 : Math.max(1, Math.ceil(text.length * 0.3));
-  }
-}
-
 // reserved = system prompt + tool specs, constant for the tab's lifetime once
-// the loop is built. logTokens is refreshed during turns so Desktop doesn't
-// show a fake zero while the streaming call is still waiting on usage metadata.
+// the loop is built. The growing log portion is already covered by the
+// per-turn cache hit/miss numbers in `model.final`.
 function emitCtxBreakdown(tab: Tab): void {
   if (!tab.runtime) return;
-  const sys = countTokensForMeter(tab.runtime.loop.prefix.system);
-  const tools = countTokensForMeter(JSON.stringify(tab.runtime.loop.prefix.toolSpecs));
-  let logTokens = 0;
   try {
-    logTokens = tab.runtime.loop.getCurrentLogTokens();
+    const sys = countTokensBounded(tab.runtime.loop.prefix.system);
+    const tools = countTokensBounded(JSON.stringify(tab.runtime.loop.prefix.toolSpecs));
+    const logTokens = tab.runtime.loop.getCurrentLogTokens();
+    emit({ type: "$ctx_breakdown", reservedTokens: sys + tools, logTokens }, tab.id);
   } catch {
-    for (const msg of tab.runtime.loop.log.toMessages()) {
-      logTokens += countTokensForMeter(typeof msg.content === "string" ? msg.content : "");
-      if (msg.role === "assistant" && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
-        logTokens += countTokensForMeter(JSON.stringify(msg.tool_calls));
-      }
-    }
+    // tokenizer warmup can throw on first call before the data file loads
   }
-  emit({ type: "$ctx_breakdown", reservedTokens: sys + tools, logTokens }, tab.id);
 }
 
 function emitSkills(tab: Tab): void {
@@ -993,7 +939,6 @@ interface Tab {
   mcpStatuses: Map<string, { kind: McpSpecStatus; reason?: string; toolCount?: number }>;
   /** True while a session switch is in progress — prevents stale events from the old turn. */
   switching: boolean;
-  hooks: ResolvedHook[];
 }
 
 let tabCounter = 0;
@@ -1028,8 +973,6 @@ function buildRuntimeFor(tab: Tab): RuntimeState {
     budgetUsd: tab.budgetUsd,
     session: tab.currentSession,
     reasoningEffort,
-    hooks: tab.hooks,
-    hookCwd: tab.rootDir,
   });
   const eventizer = new Eventizer();
   const ctx = { model: tab.currentModel, prefixHash: prefix.fingerprint, reasoningEffort };
@@ -1479,7 +1422,6 @@ export async function desktopCommand(opts: DesktopOptions): Promise<void> {
       mcpRuntime: null,
       mcpStatuses: new Map(),
       switching: false,
-      hooks: loadHooks({ projectRoot: dir }),
     };
     tab.currentSession = mintSessionFor(dir);
     tabs.set(tab.id, tab);
@@ -1516,7 +1458,8 @@ export async function desktopCommand(opts: DesktopOptions): Promise<void> {
           emit({ type: "$error", message: `mcp reload failed: ${(err as Error).message}` }, tab.id);
         });
     }
-    const requested = (readConfig().mcp ?? []).length;
+    const allSpecs = getAllMcpSpecs(readConfig());
+    const requested = allSpecs.length;
     if (requested === 0) return Promise.resolve();
     const runtime = createMcpRuntime({
       getTools: () => {
@@ -1531,8 +1474,8 @@ export async function desktopCommand(opts: DesktopOptions): Promise<void> {
     tab.mcpRuntime = runtime;
     runtime.setLifecycleSink((notice) => {
       if (notice.kind === "slow") return; // not surfaced in the desktop panel
-      const cfg = readConfig().mcp ?? [];
-      const target = cfg.find((raw) => {
+      const specs = getAllMcpSpecs(readConfig());
+      const target = specs.find((raw) => {
         try {
           return parseMcpSpec(raw).name === notice.name;
         } catch {
@@ -1616,37 +1559,13 @@ export async function desktopCommand(opts: DesktopOptions): Promise<void> {
         }
       }
     }
-    if (tab.hooks.some((h) => h.event === "UserPromptSubmit")) {
-      const report = await runHooks({
-        hooks: tab.hooks,
-        payload: { event: "UserPromptSubmit", cwd: tab.rootDir, prompt: text },
-      });
-      for (const o of report.outcomes) {
-        if (o.decision === "pass") continue;
-        emit({ type: "$error", message: formatHookOutcomeMessage(o) }, tab.id);
-      }
-      if (report.blocked) {
-        tab.aborter = null;
-        emit({ type: "$turn_complete" }, tab.id);
-        if (fromQQ) markQQTurnFinished(qqRuntime.routing, tab.id);
-        return;
-      }
-    }
     await tabContext.run(tab.id, async () => {
       try {
-        let emittedTurnContext = false;
         for await (const ev of rt.loop.step(text)) {
-          if (!emittedTurnContext) {
-            emittedTurnContext = true;
-            emitCtxBreakdown(tab);
-          }
           if (ev.role === "assistant_final" && ev.content) {
             lastAssistantText = ev.content;
           }
           for (const kev of rt.eventizer.consume(ev, rt.ctx)) emit(kev, tab.id);
-          if (ev.role === "assistant_final" || ev.role === "tool") {
-            emitCtxBreakdown(tab);
-          }
           // Memory tools mutate disk state behind the loop's back — the UI
           // panel won't know until we re-emit. Without this the right-hand
           // panel only updates on tab reopen.
@@ -1683,21 +1602,6 @@ export async function desktopCommand(opts: DesktopOptions): Promise<void> {
           }
           emitSessions(tab);
           void emitBalance(tab);
-          if (tab.hooks.some((h) => h.event === "Stop")) {
-            const stopReport = await runHooks({
-              hooks: tab.hooks,
-              payload: {
-                event: "Stop",
-                cwd: tab.rootDir,
-                lastAssistantText,
-                turn: rt.loop.stats.summary().turns,
-              },
-            });
-            for (const o of stopReport.outcomes) {
-              if (o.decision === "pass") continue;
-              emit({ type: "$error", message: formatHookOutcomeMessage(o) }, tab.id);
-            }
-          }
         }
         if (fromQQ) markQQTurnFinished(qqRuntime.routing, tab.id);
         tab.switching = false;
@@ -1731,7 +1635,6 @@ export async function desktopCommand(opts: DesktopOptions): Promise<void> {
     tab.symbolIndex = null;
     tab.symbolBuilding = null;
     tab.recentMentions.length = 0;
-    tab.hooks = loadHooks({ projectRoot: target });
     tab.currentSession = mintSessionFor(target);
     tab.toolset = await buildCodeToolset({
       rootDir: target,
@@ -1756,9 +1659,9 @@ export async function desktopCommand(opts: DesktopOptions): Promise<void> {
     return undefined;
   }
 
-  function abortTurn(tab: Tab, opts: LoopAbortOptions = {}): void {
+  function abortTurn(tab: Tab, opts: { discardCurrentTurn?: boolean } = {}): void {
     tab.aborter?.abort();
-    tab.runtime?.loop.abort(opts);
+    tab.runtime?.loop.abort(opts.discardCurrentTurn ? { discardCurrentTurn: true } : undefined);
   }
 
   function tabSessionLabel(tab: Tab): string {
@@ -2287,7 +2190,6 @@ export async function desktopCommand(opts: DesktopOptions): Promise<void> {
             // unreadable jsonl — skip re-emit
           }
         }
-        emitCtxBreakdown(t);
       }
       return;
     }
@@ -2316,7 +2218,7 @@ export async function desktopCommand(opts: DesktopOptions): Promise<void> {
     }
 
     if (msg.cmd === "abort") {
-      abortTurn(tab, desktopUserAbortLoopOptions());
+      abortTurn(tab, { discardCurrentTurn: true });
       cancelPendingGates(tab);
       return;
     }
@@ -2558,8 +2460,7 @@ export async function desktopCommand(opts: DesktopOptions): Promise<void> {
           msg.tavilyApiKey !== undefined ||
           msg.perplexityApiKey !== undefined ||
           msg.exaApiKey !== undefined ||
-          msg.ollamaApiKey !== undefined ||
-          msg.braveApiKey !== undefined
+          msg.ollamaApiKey !== undefined
         ) {
           const cfg = readConfig();
           if (msg.webSearchEngine !== undefined) cfg.webSearchEngine = msg.webSearchEngine;
@@ -2580,9 +2481,6 @@ export async function desktopCommand(opts: DesktopOptions): Promise<void> {
           }
           if (msg.ollamaApiKey !== undefined) {
             cfg.ollamaApiKey = msg.ollamaApiKey?.trim() || undefined;
-          }
-          if (msg.braveApiKey !== undefined) {
-            cfg.braveApiKey = msg.braveApiKey?.trim() || undefined;
           }
           writeConfig(cfg);
         }

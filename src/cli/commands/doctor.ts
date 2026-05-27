@@ -8,6 +8,7 @@ import {
   defaultConfigPath,
   loadEndpoint,
   loadProxyConfig,
+  normalizeMcpConfig,
   readConfig,
   resolveSemanticEmbeddingConfig,
 } from "../../config.js";
@@ -192,7 +193,8 @@ async function checkConfig(): Promise<Check> {
     if (cfg.model) parts.push(`model=${cfg.model}`);
     if (cfg.reasoningEffort) parts.push(`effort=${cfg.reasoningEffort}`);
     if (cfg.editMode) parts.push(`editMode=${cfg.editMode}`);
-    if (cfg.mcp && cfg.mcp.length > 0) parts.push(`mcp=${cfg.mcp.length}`);
+    const mcpCount = normalizeMcpConfig(cfg).length;
+    if (mcpCount > 0) parts.push(`mcp=${mcpCount}`);
     return {
       id: "config",
       label: "config       ",
@@ -210,8 +212,7 @@ async function checkConfig(): Promise<Check> {
 }
 
 async function checkApiReach(): Promise<Check> {
-  const endpoint = loadEndpoint();
-  const key = endpoint.apiKey;
+  const key = process.env.DEEPSEEK_API_KEY ?? readConfig().apiKey;
   if (!key) {
     return {
       id: "api-reach",
@@ -221,21 +222,11 @@ async function checkApiReach(): Promise<Check> {
     };
   }
   try {
-    const client = new DeepSeekClient({ apiKey: key, baseUrl: endpoint.baseUrl });
+    const client = new DeepSeekClient({ apiKey: key, baseUrl: loadEndpoint().baseUrl });
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), 8_000);
-    let models: Awaited<ReturnType<DeepSeekClient["listModels"]>>;
     let balance: Awaited<ReturnType<DeepSeekClient["getBalance"]>>;
     try {
-      models = await client.listModels({ signal: ctl.signal });
-      if (models) {
-        return {
-          id: "api-reach",
-          label: "api reach    ",
-          level: "ok",
-          detail: `/models ok — ${summarizeModels(models.data)}`,
-        };
-      }
       balance = await client.getBalance({ signal: ctl.signal });
     } finally {
       clearTimeout(timer);
@@ -245,7 +236,7 @@ async function checkApiReach(): Promise<Check> {
         id: "api-reach",
         label: "api reach    ",
         level: "fail",
-        detail: "/models and /user/balance returned null — auth failed or network blocked",
+        detail: "/user/balance returned null — auth failed or network blocked",
       };
     }
     const summary = summarizeBalances(balance.balance_infos);
@@ -271,14 +262,6 @@ async function checkApiReach(): Promise<Check> {
       detail: `${(err as Error).message}`,
     };
   }
-}
-
-function summarizeModels(models: ReadonlyArray<{ id: string }>): string {
-  if (models.length === 0) return "0 models";
-  const ids = models.map((m) => m.id).filter(Boolean);
-  const preview = ids.slice(0, 3).join(", ");
-  const suffix = ids.length > 3 ? ", ..." : "";
-  return `${models.length} model${models.length === 1 ? "" : "s"}${preview ? ` (${preview}${suffix})` : ""}`;
 }
 
 function summarizeBalances(
