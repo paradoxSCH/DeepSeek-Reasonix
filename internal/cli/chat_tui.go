@@ -18,6 +18,7 @@ import (
 	"reasonix/internal/control"
 	"reasonix/internal/event"
 	"reasonix/internal/i18n"
+	"reasonix/internal/memory"
 	"reasonix/internal/plugin"
 	"reasonix/internal/provider"
 )
@@ -285,6 +286,22 @@ func (m chatTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if line == "exit" || line == "quit" || line == ":q" {
 				return m, tea.Quit
+			}
+
+			// "#<note>" quick-adds a memory line locally, no model turn —
+			// mirroring Claude Code's "#" memory shortcut.
+			if strings.HasPrefix(line, "#") {
+				m.input.Reset()
+				m.input.SetHeight(1)
+				note := strings.TrimSpace(strings.TrimPrefix(line, "#"))
+				if note == "" {
+					m.notice("nothing to remember")
+				} else if path, err := m.ctrl.QuickAdd(memory.ScopeProject, note); err != nil {
+					m.notice("memory: " + err.Error())
+				} else {
+					m.notice("remembered → " + path)
+				}
+				return m, finalize(m, cmds)
 			}
 
 			// Slash commands run locally without going through the model.
@@ -838,6 +855,8 @@ func (m *chatTUI) runSlashCommand(input string) tea.Cmd {
 		if names := m.commandNames(); names != "" {
 			m.notice("custom: " + names)
 		}
+	case "/memory":
+		m.showMemory()
 	default:
 		if sent, ok := m.ctrl.CustomCommand(input); ok {
 			return m.startTurn(m.ctrl.Compose(sent), input)

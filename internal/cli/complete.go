@@ -56,6 +56,7 @@ func (m *chatTUI) slashItems() []compItem {
 		{label: "/new", insert: "/new ", hint: "fork a fresh session"},
 		{label: "/mcp", insert: "/mcp ", hint: "MCP servers"},
 		{label: "/help", insert: "/help ", hint: "list commands"},
+		{label: "/memory", insert: "/memory ", hint: "show memory files"},
 	}
 	for _, c := range m.commands {
 		items = append(items, compItem{label: "/" + c.Name, insert: "/" + c.Name + " ", hint: c.Description})
