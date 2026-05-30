@@ -2,8 +2,10 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { DeepSeekClient, Usage } from "../src/client.js";
+import { SkillStore } from "../src/skills.js";
 import { ToolRegistry } from "../src/tools.js";
 import {
+  MAX_SUBAGENT_SPAWNS_PER_SESSION,
   type SubagentEvent,
   type SubagentResult,
   type SubagentSink,
@@ -738,5 +740,115 @@ describe("spawnSubagent allowedTools", () => {
     expect(events.map((e) => e.kind)).toEqual(["start", "end"]);
     expect(events[1]?.error).toContain("ghost");
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("spawnSubagent — global spawn cap", () => {
+  it("returns error after MAX_SUBAGENT_SPAWNS_PER_SESSION spawns", async () => {
+    const client = makeClient([{ content: "answer" }]);
+    const parent = new ToolRegistry();
+    parent.register({ name: "noop", fn: () => "ok" });
+
+    for (let i = 0; i < MAX_SUBAGENT_SPAWNS_PER_SESSION; i++) {
+      const result = await spawnSubagent({
+        client,
+        parentRegistry: parent,
+        system: "test",
+        task: `q${i}`,
+      });
+      expect(result.success).toBe(true);
+    }
+
+    const over = await spawnSubagent({
+      client,
+      parentRegistry: parent,
+      system: "test",
+      task: "one too many",
+    });
+    expect(over.success).toBe(false);
+    expect(over.error).toMatch(/hard limit reached/i);
+    expect(over.error).toMatch(new RegExp(`max ${MAX_SUBAGENT_SPAWNS_PER_SESSION}`));
+    expect(over.turns).toBe(0);
+    expect(over.toolIters).toBe(0);
+  });
+
+  it("counts spawns across all paths (spawn_subagent tool + skill subagent)", async () => {
+    const client = makeClient([{ content: "answer" }]);
+    const parent = new ToolRegistry();
+    parent.register({ name: "noop", fn: () => "ok" });
+
+    // Direct spawnSubagent calls count toward the cap
+    for (let i = 0; i < 25; i++) {
+      const r = await spawnSubagent({
+        client,
+        parentRegistry: parent,
+        system: "test",
+        task: `q${i}`,
+      });
+      expect(r.success).toBe(true);
+    }
+
+    // Tool-dispatched spawns share the same counter
+    registerSubagentTool(parent, { client });
+    for (let i = 0; i < 25; i++) {
+      const out = await parent.dispatch("spawn_subagent", JSON.stringify({ task: `q${i}` }));
+      expect(out).not.toMatch(/hard limit reached/i);
+    }
+
+    // 51st spawn should hit the cap regardless of path
+    const over = await spawnSubagent({
+      client,
+      parentRegistry: parent,
+      system: "test",
+      task: "over",
+    });
+    expect(over.success).toBe(false);
+    expect(over.error).toMatch(/hard limit reached/i);
+  });
+});
+
+describe("builtin subagent skills — allowedTools", () => {
+  const store = new SkillStore({ disableBuiltins: false });
+
+  it("explore restricts child to read/search/directory tools", () => {
+    const skill = store.read("explore");
+    expect(skill).not.toBeNull();
+    expect(skill!.allowedTools).toContain("read_file");
+    expect(skill!.allowedTools).toContain("search_content");
+    expect(skill!.allowedTools).toContain("directory_tree");
+    expect(skill!.allowedTools).not.toContain("research");
+    expect(skill!.allowedTools).not.toContain("explore");
+    expect(skill!.allowedTools).not.toContain("spawn_subagent");
+  });
+
+  it("research restricts child to read/search/web tools", () => {
+    const skill = store.read("research");
+    expect(skill).not.toBeNull();
+    expect(skill!.allowedTools).toContain("read_file");
+    expect(skill!.allowedTools).toContain("web_search");
+    expect(skill!.allowedTools).toContain("web_fetch");
+    expect(skill!.allowedTools).not.toContain("research");
+    expect(skill!.allowedTools).not.toContain("explore");
+    expect(skill!.allowedTools).not.toContain("spawn_subagent");
+  });
+
+  it("review restricts child to read/search/run_command", () => {
+    const skill = store.read("review");
+    expect(skill).not.toBeNull();
+    expect(skill!.allowedTools).toContain("read_file");
+    expect(skill!.allowedTools).toContain("run_command");
+    expect(skill!.allowedTools).not.toContain("research");
+    expect(skill!.allowedTools).not.toContain("review");
+    expect(skill!.allowedTools).not.toContain("spawn_subagent");
+  });
+
+  it("security-review restricts child to read/search/run_command", () => {
+    const skill = store.read("security-review");
+    expect(skill).not.toBeNull();
+    expect(skill!.allowedTools).toContain("read_file");
+    expect(skill!.allowedTools).toContain("run_command");
+    expect(skill!.allowedTools).not.toContain("research");
+    expect(skill!.allowedTools).not.toContain("security-review");
+    expect(skill!.allowedTools).not.toContain("spawn_subagent");
   });
 });

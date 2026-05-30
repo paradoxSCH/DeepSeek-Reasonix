@@ -124,6 +124,11 @@ const SUBAGENT_TOOL_NAME = "spawn_subagent";
 /** spawn_subagent excluded → depth=1 hard cap; submit_plan excluded → no picker mid-parent-turn. */
 const NEVER_INHERITED_TOOLS = new Set<string>([SUBAGENT_TOOL_NAME, "submit_plan"]);
 
+/** Hard cap on subagent spawns per DeepSeekClient session — prevents runaway recursion (issue #2272). */
+export const MAX_SUBAGENT_SPAWNS_PER_SESSION = 50;
+
+const sessionSpawnCounts = new WeakMap<DeepSeekClient, number>();
+
 /** Per-session spawn count past which the soft hint fires on every subsequent return. */
 const SOFT_HINT_AFTER_SPAWNS = 1;
 /** Per-session count past which the strong hint fires (asks the model to justify the next spawn). */
@@ -144,6 +149,24 @@ export function subagentBudgetHint(spawnCount: number, totalTokens: number): str
 
 /** Errors captured in the result shape, never thrown — caller decides how to surface. */
 export async function spawnSubagent(opts: SpawnSubagentOptions): Promise<SubagentResult> {
+  const count = (sessionSpawnCounts.get(opts.client) ?? 0) + 1;
+  if (count > MAX_SUBAGENT_SPAWNS_PER_SESSION) {
+    const errorMessage = `spawnSubagent hard limit reached: this session has already spawned ${count - 1} subagents (max ${MAX_SUBAGENT_SPAWNS_PER_SESSION}). Use direct tools to answer remaining questions.`;
+    return {
+      success: false,
+      output: "",
+      error: errorMessage,
+      turns: 0,
+      toolIters: 0,
+      elapsedMs: 0,
+      costUsd: 0,
+      model: opts.model ?? DEFAULT_SUBAGENT_MODEL,
+      skillName: opts.skillName,
+      usage: new Usage(),
+    };
+  }
+  sessionSpawnCounts.set(opts.client, count);
+
   const model = opts.model ?? DEFAULT_SUBAGENT_MODEL;
   const maxResultChars = opts.maxResultChars ?? DEFAULT_MAX_RESULT_CHARS;
   const sink = opts.sink;

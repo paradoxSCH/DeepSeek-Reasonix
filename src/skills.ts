@@ -663,6 +663,14 @@ const BUILTIN_SKILLS: readonly Skill[] = Object.freeze([
     scope: "builtin",
     path: "(builtin)",
     runAs: "subagent",
+    allowedTools: [
+      "read_file",
+      "search_files",
+      "search_content",
+      "directory_tree",
+      "list_directory",
+      "get_file_info",
+    ],
   }),
   Object.freeze<Skill>({
     name: "research",
@@ -672,6 +680,7 @@ const BUILTIN_SKILLS: readonly Skill[] = Object.freeze([
     scope: "builtin",
     path: "(builtin)",
     runAs: "subagent",
+    allowedTools: ["read_file", "search_files", "search_content", "web_search", "web_fetch"],
   }),
   Object.freeze<Skill>({
     name: "review",
@@ -681,6 +690,7 @@ const BUILTIN_SKILLS: readonly Skill[] = Object.freeze([
     scope: "builtin",
     path: "(builtin)",
     runAs: "subagent",
+    allowedTools: ["read_file", "search_content", "run_command"],
   }),
   Object.freeze<Skill>({
     name: "security-review",
@@ -690,6 +700,7 @@ const BUILTIN_SKILLS: readonly Skill[] = Object.freeze([
     scope: "builtin",
     path: "(builtin)",
     runAs: "subagent",
+    allowedTools: ["read_file", "search_content", "run_command"],
   }),
   Object.freeze<Skill>({
     name: "test",
