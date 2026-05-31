@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -22,7 +23,7 @@ func TestLoadDotEnvFallsBackToHome(t *testing.T) {
 	}
 
 	t.Chdir(cwd)
-	t.Setenv("HOME", home) // os.UserHomeDir() reads $HOME on unix
+	setTestHome(t, home)
 
 	// Start clean so the file values are what land (Setenv auto-restores).
 	t.Setenv("KEY_CWD", "")
@@ -53,12 +54,20 @@ func TestLoadDotEnvDoesNotOverrideEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(cwd)
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t, t.TempDir())
 	t.Setenv("PINNED", "from_env")
 
 	loadDotEnv()
 
 	if got := os.Getenv("PINNED"); got != "from_env" {
 		t.Errorf("env var must win over .env: PINNED=%q want from_env", got)
+	}
+}
+
+func setTestHome(t *testing.T, home string) {
+	t.Helper()
+	t.Setenv("HOME", home)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", home)
 	}
 }
