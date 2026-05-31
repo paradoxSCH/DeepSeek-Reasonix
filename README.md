@@ -17,7 +17,7 @@
 > [!IMPORTANT]
 > **Reasonix 1.0 is a ground-up rewrite in Go** — this branch (`main-v2`) is the new default and where development happens now.
 > The earlier `0.x` TypeScript releases are **legacy**, living on the [`v1`](https://github.com/esengine/DeepSeek-Reasonix/tree/v1) branch (maintenance only).
-> See the **[migration guide](./docs/MIGRATING.md)**. Heads-up: the install instructions below still describe the TypeScript (npm) build and are being rewritten for the Go release.
+> See the **[migration guide](./docs/MIGRATING.md)**. `npm i -g reasonix` stays the install command — `1.0.0`+ delivers the Go binary, `0.x` is the legacy TS build. (Heads-up: 1.0.0 isn't on npm yet — build from source meanwhile.)
 
 <p align="center">
   <a href="https://www.npmjs.com/package/reasonix"><img src="https://img.shields.io/npm/v/reasonix.svg?style=flat-square&color=cb3837&labelColor=161b22&logo=npm&logoColor=white" alt="npm version"/></a>

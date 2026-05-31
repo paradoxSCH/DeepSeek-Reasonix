@@ -12,7 +12,8 @@ TypeScript line; a new codebase that becomes the default (`main-v2`).
 ### Highlights
 
 - **Go kernel**: a single static binary (CGO-free), cross-compiled for
-  darwin/linux/windows on amd64 + arm64. No Node/npm runtime.
+  darwin/linux/windows on amd64 + arm64. Distributed via npm (the package wraps
+  the native binary) and release archives; no Node runtime needed to run it.
 - **Agent core**: the loop, built-in tools (read/write/edit/multi_edit/glob/grep/
   ls/bash/web_fetch/todo_write), permission gate, sandboxed bash, and the
   DeepSeek prefix-cache–oriented design.

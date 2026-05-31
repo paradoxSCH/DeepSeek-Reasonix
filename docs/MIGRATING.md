@@ -11,7 +11,7 @@ changed and how to move over.
 | Language | TypeScript / Node | Go |
 | Branch | [`v1`](https://github.com/esengine/DeepSeek-Reasonix/tree/v1) (maintenance only) | `main-v2` (default, active) |
 | Versions | `0.x` (up to v0.54.x) | `1.0.0`+ |
-| Install | `npm i -g reasonix` | a single static binary (release archive) or `go build` |
+| Install | `npm i -g reasonix` (npm ships the TS build) | `npm i -g reasonix` too — the package wraps the Go binary; or a release archive / `go build` |
 | Code intelligence | embedding semantic search | bundled [CodeGraph](https://github.com/colbymchenry/codegraph) (symbol/call graph) |
 
 "v1" and "v2" are **codebase generations**, not semver: the v1 line never reached
@@ -19,21 +19,26 @@ changed and how to move over.
 
 ## Installing 1.0
 
-Until the first `v1.0.0` release is published, build from source:
+`npm` stays the primary channel — the package wraps the prebuilt Go binary (the
+same way esbuild/biome ship native binaries via npm). The binary itself is a
+standalone Go executable; npm is only the installer, not a runtime dependency.
 
 ```sh
-git clone https://github.com/esengine/DeepSeek-Reasonix
-cd DeepSeek-Reasonix          # default branch is main-v2 (Go)
-make build                    # -> bin/reasonix
-./bin/reasonix chat
+npm i -g reasonix      # 1.0.0+ delivers the Go binary; 0.x is the legacy TS build
+reasonix chat
 ```
 
-Once `v1.0.0` is tagged, prebuilt archives are attached to the GitHub release
-(`reasonix-<os>-<arch>.tar.gz` / `.zip`). On macOS/Linux the archive bundles the
-CodeGraph runtime beside the binary, so code-intelligence works out of the box.
+Prebuilt archives (`reasonix-<os>-<arch>.tar.gz` / `.zip`) are also attached to
+each GitHub release — on macOS/Linux they bundle the CodeGraph runtime beside the
+binary, so code-intelligence works out of the box. Or build from source:
 
-There is no `npm` package for the Go line; `npm i -g reasonix` installs the
-legacy TypeScript build.
+```sh
+git clone https://github.com/esengine/DeepSeek-Reasonix   # default: main-v2 (Go)
+cd DeepSeek-Reasonix && make build                        # -> bin/reasonix
+```
+
+Until `1.0.0` is published to npm, `npm i -g reasonix` still installs the `0.x`
+TypeScript build — build from source (above) for the Go version meanwhile.
 
 ## Configuration
 
